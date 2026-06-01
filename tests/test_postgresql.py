@@ -390,6 +390,9 @@ class TestPostgresql(BaseTestPostgresql):
         self.p.query('select 1')
         self.assertRaises(PostgresConnectionException, self.p.query, 'RetryFailedError')
         self.assertRaises(psycopg.ProgrammingError, self.p.query, 'blabla')
+        # A ProgrammingError must recycle the backend so the next cycle reconnects
+        # and clears any poisoned backend state (e.g. stale extension hooks).
+        self.assertIsNone(self.p._connection._connection)
 
     @patch.object(Postgresql, 'pg_isready', Mock(return_value=PgIsReadyStatus.REJECT))
     def test_is_primary(self):

@@ -78,9 +78,12 @@ class NamedConnection:
                 # When connected via unix socket, psycopg2 can't recognize 'connection lost' and leaves
                 # `self._connection.closed == 0`, but the generic exception is raised. It doesn't make
                 # sense to continue with existing connection and we will close it, to avoid its reuse.
-                if type(exc) in (psycopg.DatabaseError, psycopg.OperationalError):
-                    self.close()
-                else:
+                # The same applies to any other error (e.g. a ``ProgrammingError`` such as
+                # ``InvalidSchemaName`` raised after ``DROP EXTENSION``): the long-lived backend may carry
+                # poisoned state that a fresh connection would clear, so we recycle it before re-raising the
+                # original exception.
+                self.close()
+                if type(exc) not in (psycopg.DatabaseError, psycopg.OperationalError):
                     raise exc
             raise PostgresConnectionException('connection problems') from exc
 
