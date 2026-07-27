@@ -186,6 +186,28 @@ class TestPostmasterProcess(unittest.TestCase):
         mock_popen.side_effect = Exception
         self.assertIsNone(PostmasterProcess.start('true', '/tmp', '/tmp/test.conf', []))
 
+    @patch('subprocess.Popen')
+    @patch('os.setsid', Mock(), create=True)
+    @patch('multiprocessing.Process', MockProcess)
+    @patch('multiprocessing.get_context', Mock(return_value=multiprocessing), create=True)
+    @patch('os.environ', {})
+    @patch.object(PostmasterProcess, 'from_pid', Mock(return_value='proc 123'))
+    @patch.object(PostmasterProcess, '_from_pidfile')
+    def test_start_with_exec_prefix(self, mock_frompidfile, mock_popen):
+        mock_frompidfile.return_value._is_postmaster_process.return_value = True
+        mock_popen.return_value.pid = 123
+        prefix = ['/usr/local/libexec/hz-pg-launcher', '--profile', 'core-v1', '--']
+
+        PostmasterProcess.start('/usr/lib/postgresql/18/bin/postgres', '/tmp', '/tmp/test.conf',
+                                ['--cluster_name=batman'], prefix)
+
+        self.assertEqual(mock_popen.call_args[0][0],
+                         prefix + ['/usr/lib/postgresql/18/bin/postgres', '-D', '/tmp',
+                                   '--config-file=/tmp/test.conf', '--cluster_name=batman'])
+        # process identity checks must receive the real PostgreSQL executable, not the prefix
+        mock_frompidfile.return_value._is_postmaster_process.assert_called_once_with(
+            '/usr/lib/postgresql/18/bin/postgres', '/tmp')
+
     @patch('psutil.Process.__init__', Mock(side_effect=psutil.NoSuchProcess(123)))
     def test_read_postmaster_pidfile(self):
         with patch('builtins.open', Mock(side_effect=IOError)):

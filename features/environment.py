@@ -1144,6 +1144,8 @@ def before_feature(context, feature):
     """ create per-feature output directory to collect Patroni and PostgreSQL logs """
     if feature.name == 'watchdog' and os.name == 'nt':
         return feature.skip("Watchdog isn't supported on Windows")
+    elif feature.name == 'postgres exec prefix' and os.name != 'posix':
+        return feature.skip('postgresql.postgres_exec_prefix is only supported on POSIX platforms')
     elif feature.name == 'citus':
         lib = subprocess.check_output(['pg_config', '--pkglibdir']).decode('utf-8').strip()
         if not os.path.exists(os.path.join(lib, 'citus.so')):

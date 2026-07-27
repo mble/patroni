@@ -19,13 +19,14 @@ from patroni import global_config
 from patroni.async_executor import CriticalTask
 from patroni.collections import CaseInsensitiveDict, CaseInsensitiveSet
 from patroni.dcs import RemoteMember
-from patroni.exceptions import PatroniException, PostgresConnectionException
+from patroni.exceptions import PatroniException, PatroniFatalException, PostgresConnectionException
 from patroni.file_perm import pg_perm
 from patroni.postgresql import PgIsReadyStatus, Postgresql
 from patroni.postgresql.bootstrap import Bootstrap
 from patroni.postgresql.callback_executor import CallbackAction
-from patroni.postgresql.config import _false_validator, get_param_diff
+from patroni.postgresql.config import _false_validator, ConfigHandler, get_param_diff
 from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
+from patroni.postgresql.mpp import get_mpp
 from patroni.postgresql.postmaster import PostmasterProcess
 from patroni.postgresql.validator import _get_postgres_guc_validators, _load_postgres_gucs_validators, \
     _read_postgres_gucs_validators_file, Bool, Enum, EnumBool, Integer, InvalidGucValidatorsFile, \
@@ -1296,3 +1297,167 @@ class TestPostgresqlStateMetrics(unittest.TestCase):
                 actual_value = state.index
                 self.assertEqual(actual_value, expected_value,
                                  f"Metrics value for {state} changed from {expected_value} to {actual_value}")
+
+
+@patch('subprocess.call', Mock(return_value=0))
+@patch('subprocess.check_output', Mock(return_value=b"postgres (PostgreSQL) 12.1"))
+@patch('patroni.psycopg.connect', psycopg_connect)
+@patch.object(Postgresql, 'available_gucs', mock_available_gucs)
+class TestPostgresExecPrefix(BaseTestPostgresql):
+
+    PREFIX = ['/usr/local/libexec/hz-pg-launcher', '--profile', 'core-v1', '--']
+
+    @staticmethod
+    def _valid_prefix():
+        """Make :func:`~patroni.validator.validate_postgres_exec_prefix` accept any absolute path."""
+        return patch.multiple('os.path', isfile=Mock(return_value=True)), patch('os.access', Mock(return_value=True))
+
+    def _reload(self, prefix, is_running=False):
+        config = deepcopy(self.p.config._config)
+        if prefix is None:
+            config.pop('postgres_exec_prefix', None)
+        else:
+            config['postgres_exec_prefix'] = prefix
+        isfile, access = self._valid_prefix()
+        with isfile, access, patch.object(Postgresql, 'is_running', Mock(return_value=is_running)):
+            self.p.reload_config(config)
+
+    def test_no_prefix_keeps_argv_unchanged(self):
+        self.assertEqual(self.p.postgres_exec_prefix, [])
+        self.assertEqual(self.p.postgres_command('-D', 'data'), [self.p.pgcommand('postgres'), '-D', 'data'])
+        self.assertEqual(self.p.postgres_command(), [self.p.pgcommand('postgres')])
+
+    def test_prefix_is_prepended(self):
+        self._reload(self.PREFIX)
+        self.assertEqual(self.p.postgres_exec_prefix, self.PREFIX)
+        self.assertEqual(self.p.postgres_command('--single', '-D', 'data'),
+                         self.PREFIX + [self.p.pgcommand('postgres'), '--single', '-D', 'data'])
+
+    def test_pgcommand_returns_real_executable(self):
+        self._reload(self.PREFIX)
+        self.assertEqual(self.p.pgcommand('postgres'), 'postgres')
+
+    def test_prefix_without_arguments(self):
+        self._reload(['/usr/local/libexec/hz-pg-launcher'])
+        self.assertEqual(self.p.postgres_command('--describe-config'),
+                         ['/usr/local/libexec/hz-pg-launcher', self.p.pgcommand('postgres'), '--describe-config'])
+
+    @patch('patroni.postgresql.logger.info')
+    def test_reload_change_and_removal(self, mock_info):
+        self._reload(self.PREFIX)
+        self._reload(['/usr/local/libexec/other-launcher'])
+        self.assertEqual(self.p.postgres_command(),
+                         ['/usr/local/libexec/other-launcher', self.p.pgcommand('postgres')])
+        self._reload(None)
+        self.assertEqual(self.p.postgres_command(), [self.p.pgcommand('postgres')])
+        self.assertEqual(mock_info.call_count, 3)
+
+    @patch('patroni.postgresql.logger.error')
+    def test_invalid_reload_retains_previous_value(self, mock_error):
+        self._reload(self.PREFIX)
+        self._reload('/usr/local/libexec/hz-pg-launcher')
+        self.assertEqual(self.p.postgres_exec_prefix, self.PREFIX)
+        mock_error.assert_called_once()
+        self.assertIn('is not a list', mock_error.call_args[0][1])
+
+    @patch('patroni.postgresql.logger.warning')
+    @patch.object(Postgresql, 'restart')
+    def test_reload_does_not_restart_running_postmaster(self, mock_restart, mock_warning):
+        self._reload(self.PREFIX, is_running=True)
+        mock_restart.assert_not_called()
+        mock_warning.assert_called_once()
+        self.assertIn('restart', mock_warning.call_args[0][0])
+
+    @patch('patroni.postgresql.logger.warning')
+    def test_unchanged_reload_is_silent(self, mock_warning):
+        self._reload(self.PREFIX)
+        mock_warning.reset_mock()
+        self._reload(self.PREFIX, is_running=True)
+        mock_warning.assert_not_called()
+
+    def test_invalid_prefix_on_startup_is_fatal(self):
+        config = deepcopy(self.p.config._config)
+        config.update({'name': 'postgresql0', 'scope': 'batman', 'retry_timeout': 10,
+                       'postgres_exec_prefix': ['relative/launcher']})
+        with self.assertRaises(PatroniFatalException) as e:
+            Postgresql(config, get_mpp(config))
+        self.assertIn('postgres_exec_prefix', str(e.exception))
+
+    @patch.object(Postgresql, 'is_running', Mock(return_value=None))
+    @patch.object(Postgresql, 'wait_for_startup', Mock(return_value=True))
+    @patch.object(Postgresql, 'wait_for_port_open', Mock(return_value=True))
+    @patch.object(Postgresql, 'ensure_major_version_is_known', Mock(return_value=True))
+    @patch.object(ConfigHandler, 'write_postgresql_conf', Mock())
+    def test_postmaster_start_receives_prefix_separately(self):
+        self._reload(self.PREFIX)
+        with patch.object(PostmasterProcess, 'start', Mock(return_value=MockPostmaster())) as mock_start:
+            self.p.start()
+        self.assertEqual(mock_start.call_args[0][0], self.p.pgcommand('postgres'))
+        self.assertEqual(mock_start.call_args[0][4], self.PREFIX)
+
+    def test_get_guc_value_uses_prefix(self):
+        self._reload(self.PREFIX)
+        with patch('subprocess.check_output', Mock(return_value=b'on')) as mock_check_output:
+            self.assertEqual(self.p.get_guc_value('wal_log_hints'), 'on')
+        self.assertEqual(mock_check_output.call_args[0][0],
+                         self.PREFIX + [self.p.pgcommand('postgres'), '-D', self.p.data_dir,
+                                        '-C', 'wal_log_hints',
+                                        '--config-file={}'.format(self.p.config.postgresql_conf)])
+
+    def test_describe_config_uses_prefix(self):
+        self._reload(self.PREFIX)
+        with patch('subprocess.check_output', Mock(return_value=b'foo\tbar')) as mock_check_output:
+            self.p._get_gucs()
+        self.assertEqual(mock_check_output.call_args[0][0],
+                         self.PREFIX + [self.p.pgcommand('postgres'), '--describe-config'])
+
+    def test_runtime_version_probe_uses_prefix(self):
+        self._reload(self.PREFIX)
+        self.p.set_state(PostgresqlState.STOPPED)
+        with patch('subprocess.check_output', Mock(return_value=b'postgres (PostgreSQL) 12.1')) as mock_check_output:
+            self.p.config.pg_version
+        self.assertEqual(mock_check_output.call_args[0][0],
+                         self.PREFIX + [self.p.pgcommand('postgres'), '--version'])
+
+    def test_other_utilities_are_not_prefixed(self):
+        self._reload(self.PREFIX)
+        real = self.p.pgcommand
+        with patch('subprocess.call', Mock(return_value=0)) as mock_call:
+            self.p.initdb('--foo')
+            self.assertEqual(mock_call.call_args[0][0], [real('initdb'), '--foo', self.p.data_dir])
+            self.p.pg_isready()
+            self.assertEqual(mock_call.call_args[0][0][0], real('pg_isready'))
+            self.p.pg_ctl('reload')
+            self.assertEqual(mock_call.call_args[0][0][0], real('pg_ctl'))
+        with open(os.path.join(self.p.data_dir, 'PG_VERSION'), 'w') as f:
+            f.write('12')
+        with patch('subprocess.check_output', Mock(return_value=b'')) as mock_check_output:
+            self.p.controldata()
+            self.assertEqual(mock_check_output.call_args[0][0], [real('pg_controldata'), self.p.data_dir])
+
+    @patch.object(Postgresql, 'is_running', Mock(return_value=None))
+    @patch.object(Postgresql, 'ensure_major_version_is_known', Mock(return_value=True))
+    @patch.object(ConfigHandler, 'write_postgresql_conf', Mock())
+    def test_failed_prefix_start_has_no_unprefixed_fallback(self):
+        self._reload(self.PREFIX)
+        with patch.object(PostmasterProcess, 'start', Mock(return_value=None)) as mock_start:
+            self.assertFalse(self.p.start())
+        self.assertEqual(mock_start.call_count, 1)
+        self.assertEqual(mock_start.call_args[0][4], self.PREFIX)
+        # unchanged Patroni semantics: the HA loop, not `start()`, moves the state out of `starting`
+        self.assertEqual(self.p.state, PostgresqlState.STARTING)
+
+    def test_failed_prefixed_utility_has_no_unprefixed_fallback(self):
+        self._reload(self.PREFIX)
+        exc = OSError(2, 'No such file or directory')
+        with patch('subprocess.check_output', Mock(side_effect=exc)) as mock_check_output, \
+                patch('patroni.postgresql.logger.error') as mock_error:
+            self.assertIsNone(self.p.get_guc_value('wal_log_hints'))
+        self.assertEqual(mock_check_output.call_count, 1)
+        self.assertIn(self.PREFIX[0], str(mock_error.call_args[0][1]))
+
+    def test_postmaster_identity_check_uses_real_executable(self):
+        self._reload(self.PREFIX)
+        with patch.object(PostmasterProcess, 'from_pidfile', Mock(return_value=None)) as mock_from_pidfile:
+            self.p.is_running()
+        mock_from_pidfile.assert_called_once_with(self.p.pgcommand('postgres'), self.p.data_dir)

@@ -394,3 +394,27 @@ class TestConfig(unittest.TestCase):
         # Modifying the result should not affect the config
         result['parameters']['shared_buffers'] = '1GB'
         self.assertEqual(self.config['postgresql']['parameters']['shared_buffers'], '256MB')
+
+
+class TestPostgresExecPrefixIsLocalOnly(unittest.TestCase):
+
+    @patch('os.path.isfile', Mock(return_value=True))
+    @patch('json.load', Mock(side_effect=Exception))
+    @patch('builtins.open', MagicMock())
+    def setUp(self):
+        sys.argv = ['patroni.py']
+        os.environ[Config.PATRONI_CONFIG_VARIABLE] = \
+            'restapi: {}\npostgresql: {data_dir: foo, postgres_exec_prefix: [/usr/bin/launcher, --]}'
+        self.config = Config(None)
+
+    def test_dynamic_configuration_cannot_set_it(self):
+        self.config.set_dynamic_configuration({'postgresql': {'postgres_exec_prefix': ['/usr/bin/evil']}})
+        self.assertEqual(self.config['postgresql']['postgres_exec_prefix'], ['/usr/bin/launcher', '--'])
+
+    def test_dynamic_configuration_cannot_introduce_it(self):
+        os.environ[Config.PATRONI_CONFIG_VARIABLE] = 'restapi: {}\npostgresql: {data_dir: foo}'
+        with patch('os.path.isfile', Mock(return_value=True)), patch('json.load', Mock(side_effect=Exception)), \
+                patch('builtins.open', MagicMock()):
+            config = Config(None)
+        config.set_dynamic_configuration({'postgresql': {'postgres_exec_prefix': ['/usr/bin/evil']}})
+        self.assertNotIn('postgres_exec_prefix', config['postgresql'])

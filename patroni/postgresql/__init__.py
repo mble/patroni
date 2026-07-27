@@ -21,9 +21,10 @@ from ..async_executor import CriticalTask
 from ..collections import CaseInsensitiveDict, CaseInsensitiveSet, EMPTY_DICT
 from ..daemon import notify_systemd
 from ..dcs import Cluster, Leader, Member, RemoteMember, slot_name_from_member_name
-from ..exceptions import PostgresConnectionException
+from ..exceptions import ConfigParseError, PatroniFatalException, PostgresConnectionException
 from ..tags import Tags
 from ..utils import data_directory_is_empty, parse_int, polling_loop, Retry, RetryFailedError
+from ..validator import validate_postgres_exec_prefix
 from .bootstrap import Bootstrap
 from .callback_executor import CallbackAction, CallbackExecutor
 from .cancellable import CancellableSubprocess
@@ -64,6 +65,20 @@ def null_context():
     yield
 
 
+def _parse_postgres_exec_prefix(config: Dict[str, Any]) -> List[str]:
+    """Extract and validate ``postgresql.postgres_exec_prefix`` from *config*.
+
+    :param config: the ``postgresql`` section of the Patroni configuration.
+
+    :returns: the validated argv prefix, or an empty list if the option is not set.
+
+    :raises:
+        :exc:`~patroni.exceptions.ConfigParseError`: if the configured value is invalid.
+    """
+    prefix = config.get('postgres_exec_prefix')
+    return [] if prefix is None else validate_postgres_exec_prefix(prefix)
+
+
 class Postgresql(object):
 
     POSTMASTER_START_TIME = "pg_catalog.pg_postmaster_start_time()"
@@ -95,6 +110,10 @@ class Postgresql(object):
         self._connection = self.connection_pool.get('heartbeat')
         self.mpp_handler = mpp.get_handler_impl(self)
         self._bin_dir = config.get('bin_dir') or ''
+        try:
+            self._postgres_exec_prefix = _parse_postgres_exec_prefix(config)
+        except ConfigParseError as e:
+            raise PatroniFatalException('`postgresql.postgres_exec_prefix` {0}'.format(e.value))
         self._role_lock = Lock()
         self.set_role(PostgresqlRole.UNINITIALIZED)
         self.bootstrap = Bootstrap(self)
@@ -294,6 +313,25 @@ class Postgresql(object):
         """
         return os.path.join(self._bin_dir, (self.config.get('bin_name', {}) or EMPTY_DICT).get(cmd, cmd))
 
+    @property
+    def postgres_exec_prefix(self) -> List[str]:
+        """Argv prefix prepended to direct invocations of the ``postgres`` executable."""
+        return self._postgres_exec_prefix
+
+    def postgres_command(self, *args: str) -> List[str]:
+        """Build a command line that executes the ``postgres`` executable.
+
+        .. note::
+            Every direct execution of ``postgres`` must be built with this method so that
+            ``postgresql.postgres_exec_prefix`` is honoured. :meth:`pgcommand` must be used instead when the real
+            PostgreSQL executable is needed for process discovery or identity checks.
+
+        :param args: arguments to pass to the ``postgres`` executable.
+
+        :returns: argv that executes ``postgres`` through the configured execution prefix, if any.
+        """
+        return [*self.postgres_exec_prefix, self.pgcommand('postgres'), *args]
+
     def pg_ctl(self, cmd: str, *args: str, **kwargs: Any) -> bool:
         """Builds and executes pg_ctl command
 
@@ -336,8 +374,32 @@ class Postgresql(object):
             return PgIsReadyStatus.UNKNOWN
 
     def reload_config(self, config: Dict[str, Any], sighup: bool = False) -> None:
+        self._reload_postgres_exec_prefix(config)
         self.config.reload_config(config, sighup)
         self._is_leader_retry.deadline = self.retry.deadline = config['retry_timeout'] / 2.0
+
+    def _reload_postgres_exec_prefix(self, config: Dict[str, Any]) -> None:
+        """Apply a new value of ``postgresql.postgres_exec_prefix`` from *config*.
+
+        An invalid value is rejected as a whole and the previously accepted one is retained. A valid value applies to
+        subsequent direct ``postgres`` executions only, a running postmaster is never restarted automatically.
+
+        :param config: the ``postgresql`` section of the new Patroni configuration.
+        """
+        try:
+            new_prefix = _parse_postgres_exec_prefix(config)
+        except ConfigParseError as e:
+            return logger.error('Rejecting new value of `postgresql.postgres_exec_prefix`, it %s.'
+                                ' Keeping the previous value %s', e.value, self._postgres_exec_prefix or None)
+
+        if new_prefix == self._postgres_exec_prefix:
+            return
+
+        self._postgres_exec_prefix = new_prefix
+        logger.info('`postgresql.postgres_exec_prefix` changed to %s', new_prefix or None)
+        if self.is_running():
+            logger.warning('The running postmaster keeps the execution prefix it was started with,'
+                           ' a PostgreSQL restart is required to apply the new value')
 
     @property
     def pending_restart_reason(self) -> CaseInsensitiveDict:
@@ -809,7 +871,8 @@ class Postgresql(object):
             self._postmaster_proc = PostmasterProcess.start(self.pgcommand('postgres'),
                                                             self._data_dir,
                                                             self.config.postgresql_conf,
-                                                            options)
+                                                            options,
+                                                            self.postgres_exec_prefix)
 
             if task:
                 task.complete(self._postmaster_proc)
@@ -1067,8 +1130,8 @@ class Postgresql(object):
         return True
 
     def get_guc_value(self, name: str) -> Optional[str]:
-        cmd = [self.pgcommand('postgres'), '-D', self._data_dir, '-C', name,
-               '--config-file={}'.format(self.config.postgresql_conf)]
+        cmd = self.postgres_command('-D', self._data_dir, '-C', name,
+                                    '--config-file={}'.format(self.config.postgresql_conf))
         try:
             data = subprocess.check_output(cmd)
             if data:
@@ -1419,7 +1482,7 @@ class Postgresql(object):
 
         :returns: all available GUCs in the local Postgres server.
         """
-        cmd = [self.pgcommand('postgres'), '--describe-config']
+        cmd = self.postgres_command('--describe-config')
         return CaseInsensitiveSet({
             line.split('\t')[0] for line in subprocess.check_output(cmd).decode('utf-8').strip().split('\n')
         })

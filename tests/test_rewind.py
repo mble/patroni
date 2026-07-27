@@ -327,6 +327,19 @@ class TestRewind(BaseTestPostgresql):
         subprocess_popen_mock.return_value.wait.return_value = 0
         subprocess_popen_mock.return_value.communicate.return_value = ('', '')
         self.assertEqual(self.r.single_user_mode({'input': 'CHECKPOINT'}, {'archive_mode': 'on'}), 0)
+        self.assertEqual(subprocess_popen_mock.call_args[0][0],
+                         [self.p.pgcommand('postgres'), '--single', '-D', self.p.data_dir,
+                          '-c', 'archive_mode=on', 'template1'])
+
+    @patch('psutil.Popen')
+    def test_single_user_mode_with_exec_prefix(self, subprocess_popen_mock):
+        subprocess_popen_mock.return_value.wait.return_value = 0
+        subprocess_popen_mock.return_value.communicate.return_value = ('', '')
+        prefix = ['/usr/local/libexec/hz-pg-launcher', '--']
+        with patch.object(Postgresql, 'postgres_exec_prefix', PropertyMock(return_value=prefix)):
+            self.assertEqual(self.r.single_user_mode(), 0)
+        self.assertEqual(subprocess_popen_mock.call_args[0][0],
+                         prefix + [self.p.pgcommand('postgres'), '--single', '-D', self.p.data_dir, 'template1'])
 
     @patch('os.listdir', Mock(side_effect=[OSError, ['a', 'b']]))
     @patch('os.unlink', Mock(side_effect=OSError))

@@ -450,6 +450,7 @@ class Config(object):
                 * ``data_dir``;
                 * ``pgpass``;
                 * ``authentication``;
+                * ``postgres_exec_prefix``;
 
             Besides that any setting present in *dynamic_configuration* but absent from :attr:`__DEFAULT_CONFIG` is
             discarded.
@@ -466,8 +467,8 @@ class Config(object):
                 for name, value in (value or EMPTY_DICT).items():
                     if name == 'parameters':
                         config['postgresql'][name].update(self._process_postgresql_parameters(value))
-                    elif name not in ('connect_address', 'proxy_address', 'listen',
-                                      'config_dir', 'data_dir', 'pgpass', 'authentication'):
+                    elif name not in ('connect_address', 'proxy_address', 'listen', 'config_dir',
+                                      'data_dir', 'pgpass', 'authentication', 'postgres_exec_prefix'):
                         config['postgresql'][name] = deepcopy(value)
             elif name == 'standby_cluster':
                 for name, value in (value or EMPTY_DICT).items():

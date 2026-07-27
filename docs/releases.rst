@@ -3,6 +3,20 @@
 Release notes
 =============
 
+Unreleased
+----------
+
+**New features**
+
+- Add ``postgresql.postgres_exec_prefix``
+
+  An optional list of arguments that Patroni prepends to every direct invocation of the ``postgres`` executable: postmaster startup, the ``postgres --single`` invocation used while rewinding, ``postgres -C``, ``postgres --describe-config``, and the runtime ``postgres --version`` probe. It allows a deployment to confine PostgreSQL and its descendants to a restricted execution domain without placing Patroni or auxiliary processes in that domain.
+
+  Omitting the setting preserves the previous command lines exactly. ``initdb``, ``pg_ctl``, ``pg_rewind``, ``pg_basebackup``, ``pg_controldata``, ``pg_isready``, the ``patroni --validate-config`` version probe, and callback scripts are never prefixed, and ``pgcommand('postgres')`` keeps returning the real PostgreSQL executable so that PID and identity checks are unaffected.
+
+  The setting is local configuration only, cannot be changed through the DCS, is supported on POSIX platforms only, must not carry secrets in its arguments, and requires the prefix to finish with ``execve``. It is fail-closed: Patroni never falls back to the raw PostgreSQL binary. A reload validates the new value before applying it, keeps the last valid value on rejection, and never restarts a running postmaster on its own. See :ref:`PostgreSQL execution prefix <postgres_exec_prefix>` for the full contract.
+
+
 Version 4.1.4
 -------------
 

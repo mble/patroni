@@ -8,8 +8,10 @@ from io import StringIO
 from unittest.mock import Mock, mock_open, patch
 
 from patroni.dcs import dcs_modules
+from patroni.exceptions import ConfigParseError
 from patroni.postgresql.sync import SYNC_STRICT_PLACEHOLDER
-from patroni.validator import Directory, populate_validate_params, schema, Schema
+from patroni.validator import Directory, populate_validate_params, schema, Schema, \
+    validate_postgres_exec_prefix
 
 available_dcs = [m.split(".")[-1] for m in dcs_modules()]
 config = {
@@ -344,6 +346,25 @@ class TestValidator(unittest.TestCase):
         self.assertEqual(['postgresql.bin_dir', 'postgresql.bin_name.postgres', 'raft.bind_addr', 'raft.self_addr'],
                          parse_output(output))
 
+    def test_postgres_exec_prefix(self, mock_out, mock_err):
+        binaries.extend(required_binaries)
+        files.append("/usr/local/libexec/hz-pg-launcher")
+        c = copy.deepcopy(config)
+        del c["postgresql"]["bin_dir"]
+        c["postgresql"]["postgres_exec_prefix"] = ["/usr/local/libexec/hz-pg-launcher", "--"]
+        with patch("os.access", Mock(return_value=True)):
+            errors = schema(c)
+        self.assertEqual(["raft.bind_addr", "raft.self_addr"], parse_output("\n".join(errors)))
+
+    def test_postgres_exec_prefix_invalid(self, mock_out, mock_err):
+        binaries.extend(required_binaries)
+        c = copy.deepcopy(config)
+        del c["postgresql"]["bin_dir"]
+        c["postgresql"]["postgres_exec_prefix"] = "/usr/local/libexec/hz-pg-launcher"
+        errors = schema(c)
+        self.assertEqual(["postgresql.postgres_exec_prefix", "raft.bind_addr", "raft.self_addr"],
+                         parse_output("\n".join(errors)))
+
     def test_one_of(self, _, __):
         c = copy.deepcopy(config)
         # Providing neither is fine
@@ -507,3 +528,67 @@ class TestValidator(unittest.TestCase):
         c['bootstrap'] = {'dcs': {'synchronous_mode': 123}}
         errors = schema(c)
         self.assertTrue(any('bootstrap.dcs.synchronous_mode' in error for error in errors))
+
+
+class TestValidatePostgresExecPrefix(unittest.TestCase):
+
+    PREFIX = ['/usr/local/libexec/hz-pg-launcher', '--profile', 'core-v1', '--']
+
+    def _validate(self, value, isfile=True, executable=True):
+        with patch('os.path.isfile', Mock(return_value=isfile)), \
+                patch('os.access', Mock(return_value=executable)):
+            return validate_postgres_exec_prefix(value)
+
+    def test_valid_prefix_with_arguments(self):
+        self.assertEqual(self._validate(self.PREFIX), self.PREFIX)
+
+    def test_valid_prefix_without_arguments(self):
+        self.assertEqual(self._validate(['/usr/local/libexec/hz-pg-launcher']),
+                         ['/usr/local/libexec/hz-pg-launcher'])
+
+    def test_scalar_string_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate('/usr/local/libexec/hz-pg-launcher')
+        self.assertEqual(e.exception.value, 'is not a list')
+
+    def test_empty_list_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate([])
+        self.assertEqual(e.exception.value, 'is an empty list')
+
+    def test_empty_string_element_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(['/usr/bin/launcher', ''])
+        self.assertEqual(e.exception.value, 'contains an empty string at position 1')
+
+    def test_non_string_element_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(['/usr/bin/launcher', 42])
+        self.assertEqual(e.exception.value, 'contains a non-string value at position 1')
+
+    def test_relative_executable_path_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(['hz-pg-launcher', '--'])
+        self.assertEqual(e.exception.value, "'hz-pg-launcher' is not an absolute path")
+
+    def test_missing_executable_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(self.PREFIX, isfile=False)
+        self.assertEqual(e.exception.value,
+                         "'/usr/local/libexec/hz-pg-launcher' does not exist or is not a regular file")
+
+    def test_directory_instead_of_executable_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(['/usr/local/libexec', '--'], isfile=False)
+        self.assertEqual(e.exception.value, "'/usr/local/libexec' does not exist or is not a regular file")
+
+    def test_non_executable_file_is_rejected(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(self.PREFIX, executable=False)
+        self.assertEqual(e.exception.value, "'/usr/local/libexec/hz-pg-launcher' is not executable")
+
+    @patch('patroni.validator.os.name', 'nt')
+    def test_rejected_on_windows(self):
+        with self.assertRaises(ConfigParseError) as e:
+            self._validate(self.PREFIX)
+        self.assertEqual(e.exception.value, 'is only supported on POSIX platforms')

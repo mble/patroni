@@ -346,6 +346,51 @@ def validate_binary_name(bin_name: str) -> bool:
     return True
 
 
+def validate_postgres_exec_prefix(prefix: Any) -> List[str]:
+    """Validate the value of the ``postgresql.postgres_exec_prefix`` configuration option.
+
+    The option is an argv list that is prepended to every direct invocation of the ``postgres`` executable. It is
+    interpreted literally: Patroni performs no shell expansion, interpolation, or ``$PATH`` lookup, hence the first
+    element must be an absolute path to an executable regular file.
+
+    .. note::
+        This function is used both by the static configuration validator and by the runtime configuration handling,
+        therefore it returns the accepted value so that callers can apply it atomically.
+
+    :param prefix: the value of the ``postgresql.postgres_exec_prefix`` configuration option.
+
+    :returns: a copy of the validated argv list.
+
+    :raises:
+        :class:`~patroni.exceptions.ConfigParseError`:
+            * If the current platform is not POSIX; or
+            * If *prefix* is not a list, or is an empty list; or
+            * If any element of *prefix* is not a non-empty string; or
+            * If the first element is not an absolute path; or
+            * If the first element does not point to an executable regular file.
+    """
+    if os.name != 'posix':
+        raise ConfigParseError('is only supported on POSIX platforms')
+    if not isinstance(prefix, list):
+        raise ConfigParseError('is not a list')
+    prefix = cast(List[Any], prefix)
+    if not prefix:
+        raise ConfigParseError('is an empty list')
+    for i, value in enumerate(prefix):
+        if not isinstance(value, str):
+            raise ConfigParseError(f'contains a non-string value at position {i}')
+        if not value:
+            raise ConfigParseError(f'contains an empty string at position {i}')
+    executable = cast(str, prefix[0])
+    if not os.path.isabs(executable):
+        raise ConfigParseError(f"'{executable}' is not an absolute path")
+    if not os.path.isfile(executable):
+        raise ConfigParseError(f"'{executable}' does not exist or is not a regular file")
+    if not os.access(executable, os.X_OK):
+        raise ConfigParseError(f"'{executable}' is not executable")
+    return list(cast(List[str], prefix))
+
+
 class Result(object):
     """Represent the result of a given validation that was performed.
 
@@ -1255,6 +1300,7 @@ schema = Schema({
             Optional("pg_rewind"): validate_binary_name,
         },
         Optional("bin_dir", ""): BinDirectory(),
+        Optional("postgres_exec_prefix"): validate_postgres_exec_prefix,
         Optional("parameters"): {
             Optional("unix_socket_directories"): str
         },

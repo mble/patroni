@@ -1244,8 +1244,24 @@ def get_postgres_version(bin_dir: Optional[str] = None, bin_name: str = 'postgre
         binary = bin_name
     else:
         binary = os.path.join(bin_dir, bin_name)
+    return get_postgres_version_from_cmd([binary])
+
+
+def get_postgres_version_from_cmd(cmd: List[str]) -> str:
+    """Get full PostgreSQL version by executing *cmd* with the ``--version`` argument appended.
+
+    Unlike :func:`get_postgres_version` this accepts a complete argv, which allows the caller to run ``postgres``
+    through an execution prefix, see :meth:`~patroni.postgresql.Postgresql.postgres_command`.
+
+    :param cmd: argv that executes the ``postgres`` binary.
+
+    :returns: the PostgreSQL version.
+
+    :raises:
+        :exc:`~patroni.exceptions.PatroniException`: if the postgres binary call failed due to :exc:`OSError`.
+    """
     try:
-        version = subprocess.check_output([binary, '--version']).decode()
+        version = subprocess.check_output(cmd + ['--version']).decode()
     except OSError as e:
         raise PatroniException(f'Failed to get postgres version: {e}')
     version = re.match(r'^[^\s]+ [^\s]+ ((\d+)(\.\d+)*)', version)

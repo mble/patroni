@@ -17,7 +17,7 @@ from ..dcs import Leader, Member, RemoteMember, slot_name_from_member_name
 from ..exceptions import PatroniFatalException, PostgresConnectionException
 from ..file_perm import pg_perm
 from ..psycopg import parse_conninfo
-from ..utils import compare_values, get_postgres_version, is_subpath, \
+from ..utils import compare_values, get_postgres_version_from_cmd, is_subpath, \
     maybe_convert_from_base_unit, parse_bool, parse_int, split_host_port, uri, validate_directory
 from ..validator import EnumValidator, IntValidator
 from .misc import get_major_from_minor_version, postgres_version_to_int, PostgresqlRole, PostgresqlState
@@ -473,7 +473,7 @@ class ConfigHandler(object):
                 return self._postgresql.server_version
             except AttributeError:
                 pass
-        bin_minor = postgres_version_to_int(get_postgres_version(bin_name=self._postgresql.pgcommand('postgres')))
+        bin_minor = postgres_version_to_int(get_postgres_version_from_cmd(self._postgresql.postgres_command()))
         bin_major = get_major_from_minor_version(bin_minor)
         datadir_major = self._postgresql.major_version
         return datadir_major if datadir_major and bin_major != datadir_major else bin_minor

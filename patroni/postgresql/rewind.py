@@ -601,7 +601,7 @@ class Rewind(object):
     def single_user_mode(self, communicate: Optional[Dict[str, Any]] = None,
                          options: Optional[Dict[str, str]] = None) -> Optional[int]:
         """run a given command in a single-user mode. If the command is empty - then just start and stop"""
-        cmd = [self._postgresql.pgcommand('postgres'), '--single', '-D', self._postgresql.data_dir]
+        cmd = self._postgresql.postgres_command('--single', '-D', self._postgresql.data_dir)
         for opt, val in sorted((options or {}).items()):
             cmd.extend(['-c', '{0}={1}'.format(opt, val)])
         # need a database name to connect

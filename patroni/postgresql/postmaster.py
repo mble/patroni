@@ -295,7 +295,21 @@ class PostmasterProcess(psutil.Process):
                 return True
 
     @staticmethod
-    def start(pgcommand: str, data_dir: str, conf: str, options: List[str]) -> Optional['PostmasterProcess']:
+    def start(pgcommand: str, data_dir: str, conf: str, options: List[str],
+              exec_prefix: Optional[List[str]] = None) -> Optional['PostmasterProcess']:
+        """Start the postmaster and return the process object that tracks it.
+
+        :param pgcommand: path to the real ``postgres`` executable. It is used both for process identity checks and as
+            the executable in the final argv.
+        :param data_dir: PostgreSQL data directory.
+        :param conf: path to ``postgresql.conf``.
+        :param options: additional command-line options for the postmaster.
+        :param exec_prefix: argv prepended to *pgcommand* when executing PostgreSQL, see
+            :meth:`~patroni.postgresql.Postgresql.postgres_command`. It is deliberately kept separate from *pgcommand*
+            so that process identity checks keep using the real PostgreSQL executable.
+
+        :returns: the :class:`PostmasterProcess` of the started postmaster, or ``None`` if the start failed.
+        """
         # Unfortunately `pg_ctl start` does not return postmaster pid to us. Without this information
         # it is hard to know the current state of postgres startup, so we had to reimplement pg_ctl start
         # in python. It will start postgres, wait for port to be open and wait until postgres will start
@@ -328,7 +342,7 @@ class PostmasterProcess(psutil.Process):
                 env['PG_GRANDPARENT_PID'] = str(proc.pid)
         except psutil.NoSuchProcess:
             pass
-        cmdline = [pgcommand, '-D', data_dir, '--config-file={}'.format(conf)] + options
+        cmdline = [*(exec_prefix or []), pgcommand, '-D', data_dir, '--config-file={}'.format(conf)] + options
         logger.debug("Starting postgres: %s", " ".join(cmdline))
         ctx = multiprocessing.get_context('spawn')
         parent_conn, child_conn = ctx.Pipe(False)
