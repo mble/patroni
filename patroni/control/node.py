@@ -12,6 +12,7 @@ from patroni.exceptions import PostgresConnectionException
 from patroni.psycopg import Error
 from patroni.utils import RetryFailedError
 
+from .commands import AgentCommands, CommandResult, CommandSubmission, EventRecord, LifecycleCommand
 from .models import Freshness, LocalPostgres, NodeSnapshot, ObservationContext, ObservationFailure, \
     PostgresRole, PostgresState, QueryMode, ReplicationConnection, SnapshotDetail, TimelineWal, WalObservation
 
@@ -99,6 +100,38 @@ class NodeControl(ABC):
         """End the current local snapshot cache scope."""
 
     @abstractmethod
+    def close(self) -> None:
+        """Stop the local command service."""
+
+    @abstractmethod
+    def submit(self, command: LifecycleCommand) -> CommandSubmission:
+        """Submit one lifecycle command."""
+
+    @abstractmethod
+    def command_status(self, command_id: str) -> Optional[CommandResult]:
+        """Return lifecycle command status."""
+
+    @abstractmethod
+    def active_command(self) -> Optional[CommandResult]:
+        """Return the active lifecycle command."""
+
+    @abstractmethod
+    def command_wait(self, command_id: str, timeout: Optional[float]) -> Optional[CommandResult]:
+        """Wait for lifecycle command progress."""
+
+    @abstractmethod
+    def command_cancel(self, command_id: str) -> Optional[CommandResult]:
+        """Cancel a lifecycle command."""
+
+    @abstractmethod
+    def command_events(self, command_id: str, after_sequence: int) -> Tuple[EventRecord, ...]:
+        """Return lifecycle events after a sequence."""
+
+    @abstractmethod
+    def command_ack(self, command_id: str, sequence: int) -> None:
+        """Acknowledge lifecycle events."""
+
+    @abstractmethod
     def is_primary(self) -> bool:
         """Return current recovery state."""
 
@@ -147,13 +180,14 @@ class InProcessNodeControl(NodeControl):
     """Collect snapshots through the same API a future agent client uses."""
 
     def __init__(self, agent_boot_id: str, observer: PostgresObserver,
-                 clock: Callable[[], float]) -> None:
+                 clock: Callable[[], float], commands: Optional[AgentCommands] = None) -> None:
         if agent_boot_id != str(UUID(agent_boot_id)):
             raise ValueError('agent_boot_id is not a canonical UUID')
 
         self._agent_boot_id = agent_boot_id
         self._observer = observer
         self._clock = clock
+        self._commands = commands
         self._lock = RLock()
         self._sequence = 0
         self._cache: Dict[SnapshotDetail, NodeSnapshot] = {}
@@ -180,6 +214,37 @@ class InProcessNodeControl(NodeControl):
     def invalidate(self) -> None:
         with self._lock:
             self._cache.clear()
+
+    def close(self) -> None:
+        if self._commands:
+            self._commands.close()
+
+    def submit(self, command: LifecycleCommand) -> CommandSubmission:
+        return self._command_service().submit(command)
+
+    def command_status(self, command_id: str) -> Optional[CommandResult]:
+        return self._command_service().status(command_id)
+
+    def active_command(self) -> Optional[CommandResult]:
+        return self._command_service().active()
+
+    def command_wait(self, command_id: str, timeout: Optional[float]) -> Optional[CommandResult]:
+        return self._command_service().wait(command_id, timeout)
+
+    def command_cancel(self, command_id: str) -> Optional[CommandResult]:
+        return self._command_service().cancel(command_id)
+
+    def command_events(self, command_id: str, after_sequence: int) -> Tuple[EventRecord, ...]:
+        return self._command_service().events(command_id, after_sequence)
+
+    def command_ack(self, command_id: str, sequence: int) -> None:
+        self._command_service().ack(command_id, sequence)
+
+    def _command_service(self) -> AgentCommands:
+        if self._commands is None:
+            raise RuntimeError('lifecycle command service is not configured')
+
+        return self._commands
 
     def is_primary(self) -> bool:
         with self._lock:

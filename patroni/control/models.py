@@ -71,6 +71,7 @@ class DesiredRole(str, Enum):
     UNCHANGED = 'unchanged'
     PRIMARY = 'primary'
     REPLICA = 'replica'
+    STANDBY_LEADER = 'standby_leader'
 
 
 class PolicyMode(str, Enum):

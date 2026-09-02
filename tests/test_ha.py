@@ -2,6 +2,7 @@ import datetime
 import inspect
 import os
 import sys
+import uuid
 
 from unittest.mock import MagicMock, Mock, mock_open, patch, PropertyMock
 
@@ -10,8 +11,11 @@ import etcd
 from patroni import global_config
 from patroni.collections import CaseInsensitiveSet
 from patroni.config import Config
-from patroni.control import InProcessNodeControl
+from patroni.control import AgentCommands, CheckpointMode, CommandKind, CommandResult, \
+    CommandState, CommandSubmission, CommandValue, DesiredRole, EventKind, EventRecord, \
+    InProcessNodeControl, LifecycleCommand, ReloadMode, StopMode, SubmitState
 from patroni.control.postgres import LocalPostgresObserver
+from patroni.control.postgres_commands import PostgresCommandDriver
 from patroni.dcs import Cluster, ClusterConfig, Failover, get_dcs, \
     Leader, Member, RemoteMember, Status, SyncState, TimelineHistory
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
@@ -159,8 +163,9 @@ zookeeper:
         self.config = Config(None)
         self.version = '1.5.7'
         self.postgresql = p
+        commands = AgentCommands(PostgresCommandDriver(p))
         self.node = InProcessNodeControl(
-            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0,
+            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0, commands,
         )
         self.dcs = d
         self.api = Mock()
@@ -252,8 +257,30 @@ class TestHa(PostgresInit):
                        'self.state_handler.is_running', 'self.state_handler.is_primary',
                        'self.state_handler.last_operation', 'self.state_handler.timeline_wal_position',
                        'self.state_handler.sysid', 'self.state_handler.server_version',
-                       'self.state_handler.pending_restart_reason'):
+                       'self.state_handler.pending_restart_reason', 'self.state_handler.start',
+                       'self.state_handler.stop', 'self.state_handler.restart', 'self.state_handler.promote',
+                       'self.state_handler.follow', 'self.state_handler.terminate_starting_postmaster'):
             self.assertNotIn(access, source)
+
+    def test_lifecycle_command_events_are_acked(self):
+        request = LifecycleCommand(
+            str(uuid.uuid4()), CommandKind.STOP, DesiredRole.UNCHANGED, 1,
+            StopMode.FAST, CheckpointMode.DEFAULT, (EventKind.SAFEPOINT,), None, ReloadMode.RESTART,
+        )
+        running = CommandResult(request, CommandState.RUNNING, CommandValue.NONE, None, None)
+        succeeded = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None)
+        event = EventRecord(request.command_id, 1, EventKind.SAFEPOINT, None, None)
+        self.ha.node = Mock()
+        self.ha.node.submit.return_value = CommandSubmission(SubmitState.ACCEPTED, running)
+        self.ha.node.command_events.side_effect = [(event,), ()]
+        self.ha.node.command_wait.side_effect = [running, succeeded]
+        handler = Mock()
+
+        result = self.ha._run_command(request, handler)
+
+        self.assertTrue(result)
+        handler.assert_called_once_with(event)
+        self.ha.node.command_ack.assert_called_once_with(request.command_id, event.sequence)
 
     def test_update_lock(self):
         self.ha.is_failsafe_mode = true
@@ -825,12 +852,10 @@ class TestHa(PostgresInit):
 
             self.ha.update_lock = false
             self.p.set_role(PostgresqlRole.PRIMARY)
-            with patch('patroni.async_executor.CriticalTask.cancel', Mock(return_value=False)), \
-                    patch('patroni.async_executor.CriticalTask.result',
-                          PropertyMock(return_value=PostmasterProcess(os.getpid())), create=True), \
-                    patch('patroni.postgresql.Postgresql.terminate_starting_postmaster') as mock_terminate:
+            command_id = self.ha._active_command_id = str(uuid.uuid4())
+            with patch.object(self.ha.node, 'command_cancel') as command_cancel:
                 self.assertEqual(self.ha.run_cycle(), 'lost leader lock during restart')
-                mock_terminate.assert_called()
+                command_cancel.assert_called_once_with(command_id)
 
             self.ha.is_paused = true
             self.assertEqual(self.ha.run_cycle(), 'PAUSE: restart in progress')
@@ -1596,7 +1621,10 @@ class TestHa(PostgresInit):
                                       'Database system identifier': SYSID, "Latest checkpoint's TimeLineID": '7'}
         self.ha.is_failover_possible = true
         self.assertEqual(self.ha.run_cycle(), 'cannot be a real primary in standby cluster')
-        self.assertEqual(follow_mock.call_args[0], (new_leader, PostgresqlRole.REPLICA))
+        follow_target, follow_role = follow_mock.call_args[0]
+        self.assertEqual(new_leader.name, follow_target.name)
+        self.assertEqual(new_leader.conn_kwargs()['host'], follow_target.conn_kwargs()['host'])
+        self.assertEqual(PostgresqlRole.REPLICA, follow_role)
         archive_mock.assert_not_called()
 
         # archiving is on

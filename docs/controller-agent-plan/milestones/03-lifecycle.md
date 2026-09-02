@@ -1,5 +1,20 @@
 # M03: Lifecycle commands
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/commands.py`,
+`patroni/control/postgres_commands.py`, `patroni/control/node.py`,
+`patroni/ha.py`, `tests/test_control_commands.py`, and
+`tests/test_control_postgres_commands.py`.
+
+Lifecycle mutations run one at a time in an agent-owned worker. Commands are
+sequenced, idempotent, cancellable, bounded, and recoverable by ID. Shutdown
+callbacks became acknowledged typed events; shutdown WAL evidence is also
+retained in the final result. Seventeen focused tests cover execution,
+replay, conflict, cancellation, event loss and acknowledgement, follow-target
+redaction, and PostgreSQL argument parity. Existing HA tests retain lifecycle
+and leader-release trace parity.
+
 ## Goal
 
 Move PostgreSQL lifecycle mutations behind an asynchronous command boundary.

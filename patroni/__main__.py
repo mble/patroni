@@ -57,8 +57,9 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         """
         from patroni import thread_pool
         from patroni.api import RestApiServer
-        from patroni.control import InProcessNodeControl
+        from patroni.control import AgentCommands, InProcessNodeControl
         from patroni.control.postgres import LocalPostgresObserver
+        from patroni.control.postgres_commands import PostgresCommandDriver
         from patroni.dcs import get_dcs
         from patroni.ha import Ha
         from patroni.postgresql import Postgresql
@@ -91,7 +92,10 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         global_config.update(None, self.config.dynamic_configuration)
 
         self.postgresql = Postgresql(self.config['postgresql'], self.dcs.mpp)
-        self.node = InProcessNodeControl(str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic)
+        commands = AgentCommands(PostgresCommandDriver(self.postgresql))
+        self.node = InProcessNodeControl(
+            str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic, commands,
+        )
         self.api = RestApiServer(self, self.config['restapi'])
         self.ha = Ha(self)
 
@@ -275,6 +279,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
             self.ha.shutdown()
         except Exception:
             logger.exception('Exception during Ha.shutdown')
+        self.node.close()
 
         thread_pool.get_executor().shutdown(wait=False)
 

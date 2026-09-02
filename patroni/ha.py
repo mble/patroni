@@ -14,19 +14,33 @@ from . import global_config, psycopg, thread_pool
 from .__main__ import Patroni
 from .async_executor import AsyncExecutor, CriticalTask
 from .collections import CaseInsensitiveSet
-from .control import Freshness, NodeSnapshot, ObservationContext, \
-    PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, SnapshotDetail
+from .control import CheckpointMode, CommandKind, CommandResult, CommandState, CommandValue, \
+    DesiredRole, EventKind, EventRecord, FollowTarget, Freshness, LifecycleCommand, NodeSnapshot, \
+    ObservationContext, PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, \
+    ReloadMode, SlotMode, SnapshotDetail, StopMode, SubmitState, TargetKind
 from .dcs import AbstractDCS, Cluster, Leader, Member, RemoteMember, Status, SyncState
 from .exceptions import DCSError, PatroniFatalException, PostgresConnectionException
 from .postgresql.callback_executor import CallbackAction
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
-from .postgresql.postmaster import PostmasterProcess
 from .postgresql.rewind import Rewind
 from .quorum import QuorumStateResolver
 from .tags import Tags
 from .utils import parse_int, polling_loop, tzutc
 
 logger = logging.getLogger(__name__)
+
+COMMAND_WAIT_SECONDS = 0.05
+
+
+def _command_value(result: CommandResult) -> Optional[bool]:
+    if result.state != CommandState.SUCCEEDED:
+        return False
+    if result.value == CommandValue.TRUE:
+        return True
+    if result.value == CommandValue.FALSE:
+        return False
+
+    return None
 
 
 class _MemberStatus(Tags, NamedTuple('_MemberStatus',
@@ -276,6 +290,8 @@ class Ha(object):
 
         # used only in backoff after failing a pre_promote script
         self._released_leader_key_timestamp = 0
+        self._command_lock = RLock()
+        self._active_command_id: Optional[str] = None
 
     def _node_state(self) -> NodeSnapshot:
         """Read local state through the controller boundary."""
@@ -305,6 +321,96 @@ class Ha(object):
 
     def _is_starting(self) -> bool:
         return self.node.is_starting()
+
+    def _run_command(self, command: LifecycleCommand,
+                     handler: Optional[Callable[[EventRecord], None]] = None) -> Optional[bool]:
+        with self._command_lock:
+            self._active_command_id = command.command_id
+
+        try:
+            submission = self.node.submit(command)
+            if submission.state not in (SubmitState.ACCEPTED, SubmitState.REPLAYED):
+                return False
+
+            sequence = 0
+            while True:
+                for event in self.node.command_events(command.command_id, sequence):
+                    if handler:
+                        handler(event)
+                    self.node.command_ack(command.command_id, event.sequence)
+                    sequence = event.sequence
+
+                result = self.node.command_wait(command.command_id, COMMAND_WAIT_SECONDS)
+                if result is None:
+                    return False
+                if result.state != CommandState.RUNNING:
+                    return _command_value(result)
+        finally:
+            with self._command_lock:
+                if self._active_command_id == command.command_id:
+                    self._active_command_id = None
+
+    def _cancel_command(self) -> Optional[CommandResult]:
+        with self._command_lock:
+            command_id = self._active_command_id
+        return self.node.command_cancel(command_id) if command_id else None
+
+    def _run_promote(self, command: LifecycleCommand,
+                     handler: Callable[[EventRecord], None]) -> Optional[bool]:
+        result = self._run_command(command, handler)
+        with self._async_response:
+            self._async_response.complete(result)
+
+        return result
+
+    def _lifecycle(self, kind: CommandKind, role: DesiredRole = DesiredRole.UNCHANGED,
+                   timeout: Optional[float] = None, stop_mode: StopMode = StopMode.FAST,
+                   checkpoint: CheckpointMode = CheckpointMode.DEFAULT,
+                   events: Tuple[EventKind, ...] = (), target: Optional[FollowTarget] = None,
+                   reload_mode: ReloadMode = ReloadMode.RESTART) -> LifecycleCommand:
+        return LifecycleCommand(
+            str(uuid.uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode,
+        )
+
+    def _stop_immediate(self) -> Optional[bool]:
+        command = self._lifecycle(
+            CommandKind.STOP,
+            timeout=self.patroni.config['retry_timeout'],
+            stop_mode=StopMode.IMMEDIATE,
+        )
+        return self._run_command(command)
+
+    @staticmethod
+    def _desired_role(role: PostgresqlRole) -> DesiredRole:
+        if role == PostgresqlRole.STANDBY_LEADER:
+            return DesiredRole.STANDBY_LEADER
+        if role == PostgresqlRole.PRIMARY:
+            return DesiredRole.PRIMARY
+
+        return DesiredRole.REPLICA
+
+    @staticmethod
+    def _follow_target(member: Union[Leader, Member, None]) -> Optional[FollowTarget]:
+        if isinstance(member, Leader):
+            member = member.member
+        if member is None:
+            return None
+
+        conn_kwargs = member.conn_kwargs()
+        host = conn_kwargs.get('host')
+
+        kind = TargetKind.REMOTE if isinstance(member, RemoteMember) else TargetKind.MEMBER
+        slot_mode = SlotMode.DISABLE \
+            if isinstance(member, RemoteMember) and member.no_replication_slot else SlotMode.USE
+        return FollowTarget(
+            kind,
+            member.name,
+            str(host) if host else None,
+            str(conn_kwargs.get('port')) if conn_kwargs.get('port') else None,
+            str(conn_kwargs.get('dbname')) if conn_kwargs.get('dbname') else None,
+            member.primary_slot_name if isinstance(member, RemoteMember) else None,
+            slot_mode,
+        )
 
     def primary_stop_timeout(self) -> Union[int, None]:
         """:returns: "primary_stop_timeout" from the global configuration or `None` when not in synchronous mode."""
@@ -568,7 +674,12 @@ class Ha(object):
             logger.info('bootstrapped %s', msg)
             cluster = self.dcs.get_cluster()
             node_to_follow = self._get_node_to_follow(cluster)
-            return self.state_handler.follow(node_to_follow) is not False
+            command = self._lifecycle(
+                CommandKind.FOLLOW,
+                DesiredRole.REPLICA,
+                target=self._follow_target(node_to_follow),
+            )
+            return self._run_command(command) is not False
         else:
             logger.error('failed to bootstrap %s', msg)
             self.state_handler.remove_data_directory()
@@ -700,8 +811,8 @@ class Ha(object):
                 and not self.state_handler.config.recovery_conf_exists():
             # We know 100% that we were running as a primary a few moments ago, therefore could just start postgres
             msg = 'starting primary after failure'
-            if self._async_executor.try_run_async(msg, self.state_handler.start,
-                                                  args=(timeout, self._async_executor.critical_task)) is None:
+            command = self._lifecycle(CommandKind.START, timeout=timeout)
+            if self._async_executor.try_run_async(msg, self._run_command, args=(command,)) is None:
                 self.recovering = True
                 return msg
 
@@ -745,8 +856,14 @@ class Ha(object):
             if self.is_synchronous_mode():
                 self.state_handler.sync_handler.set_synchronous_standby_names(CaseInsensitiveSet())
 
-        if self._async_executor.try_run_async('restarting after failure', self.state_handler.follow,
-                                              args=(node_to_follow, role, timeout)) is None:
+        command = self._lifecycle(
+            CommandKind.FOLLOW,
+            self._desired_role(role),
+            timeout,
+            target=self._follow_target(node_to_follow),
+        )
+        if self._async_executor.try_run_async('restarting after failure', self._run_command,
+                                              args=(command,)) is None:
             self.recovering = True
         return msg
 
@@ -833,10 +950,21 @@ class Ha(object):
             change_required, restart_required = self.state_handler.config.check_recovery_conf(node_to_follow)
             if change_required:
                 if restart_required:
+                    command = self._lifecycle(
+                        CommandKind.FOLLOW,
+                        self._desired_role(role),
+                        target=self._follow_target(node_to_follow),
+                    )
                     self._async_executor.try_run_async('changing primary_conninfo and restarting',
-                                                       self.state_handler.follow, args=(node_to_follow, role))
+                                                       self._run_command, args=(command,))
                 else:
-                    self.state_handler.follow(node_to_follow, role, do_reload=True)
+                    command = self._lifecycle(
+                        CommandKind.FOLLOW,
+                        self._desired_role(role),
+                        target=self._follow_target(node_to_follow),
+                        reload_mode=ReloadMode.RELOAD,
+                    )
+                    self._run_command(command)
                 self._rewind.trigger_check_diverged_lsn()
             else:
                 if role == PostgresqlRole.STANDBY_LEADER and self._pg_role() != role:
@@ -1270,8 +1398,18 @@ class Ha(object):
                 with self._async_response:
                     self._async_response.reset()
 
-                self._async_executor.try_run_async('promote', self.state_handler.promote,
-                                                   args=(self.dcs.loop_wait, self._async_response, before_promote))
+                command = self._lifecycle(
+                    CommandKind.PROMOTE,
+                    DesiredRole.PRIMARY,
+                    self.dcs.loop_wait,
+                    events=(EventKind.BEFORE_PROMOTE,),
+                )
+
+                def handle_event(event: EventRecord) -> None:
+                    if event.kind == EventKind.BEFORE_PROMOTE:
+                        before_promote()
+
+                self._async_executor.try_run_async('promote', self._run_promote, args=(command, handle_event))
             return promote_message
 
     def fetch_node_status(self, member: Member) -> _MemberStatus:
@@ -1795,11 +1933,31 @@ class Ha(object):
             else:
                 self.notify_mpp_coordinator('before_demote')
 
-        self.state_handler.stop(str(mode_control['stop']), checkpoint=bool(mode_control['checkpoint']),
-                                on_safepoint=self.watchdog.disable if self.watchdog.is_running else None,
-                                on_shutdown=on_shutdown if mode_control['release'] else None,
-                                before_shutdown=before_shutdown if mode == 'graceful' else None,
-                                stop_timeout=None if demote_cluster_with_archive else self.primary_stop_timeout())
+        events: List[EventKind] = []
+        if self.watchdog.is_running:
+            events.append(EventKind.SAFEPOINT)
+        if mode_control['release']:
+            events.append(EventKind.SHUTDOWN)
+        if mode == 'graceful':
+            events.append(EventKind.BEFORE_SHUTDOWN)
+        checkpoint = CheckpointMode.ENABLED if mode_control['checkpoint'] else CheckpointMode.DISABLED
+        command = self._lifecycle(
+            CommandKind.STOP,
+            timeout=None if demote_cluster_with_archive else self.primary_stop_timeout(),
+            stop_mode=StopMode(str(mode_control['stop'])),
+            checkpoint=checkpoint,
+            events=tuple(events),
+        )
+
+        def handle_event(event: EventRecord) -> None:
+            if event.kind == EventKind.SAFEPOINT:
+                self.watchdog.disable()
+            elif event.kind == EventKind.SHUTDOWN:
+                on_shutdown(cast(int, event.checkpoint_location), cast(int, event.previous_location))
+            elif event.kind == EventKind.BEFORE_SHUTDOWN:
+                before_shutdown()
+
+        self._run_command(command, handle_event)
         self.state_handler.set_role(PostgresqlRole.DEMOTED)
 
         # for demotion to a standby cluster we need shutdown checkpoint lsn to be written to optime, not the prev one
@@ -1842,13 +2000,17 @@ class Ha(object):
         # FIXME: with mode offline called from DCS exception handler and handle_long_action_in_progress
         # there could be an async action already running, calling follow from here will lead
         # to racy state handler state updates.
+        command = self._lifecycle(
+            CommandKind.FOLLOW,
+            self._desired_role(role),
+            target=self._follow_target(node_to_follow),
+        )
         if mode_control['async_req']:
-            self._async_executor.try_run_async('starting after demotion', self.state_handler.follow,
-                                               (node_to_follow, role,))
+            self._async_executor.try_run_async('starting after demotion', self._run_command, (command,))
         else:
             if self._rewind.rewind_or_reinitialize_needed_and_possible(leader):
                 return False  # do not start postgres, but run pg_rewind on the next iteration
-            return self.state_handler.follow(node_to_follow, role)
+            return self._run_command(command)
 
     def should_run_scheduled_action(self, action_name: str, scheduled_at: Optional[datetime.datetime],
                                     cleanup_fn: Callable[..., Any]) -> bool:
@@ -2139,9 +2301,16 @@ class Ha(object):
             self.notify_mpp_coordinator('after_promote')
 
         # For non async cases we want to wait for restart to complete or timeout before returning.
-        do_restart = functools.partial(self.state_handler.restart, timeout, self._async_executor.critical_task,
-                                       before_shutdown=before_shutdown if self.has_lock() else None,
-                                       after_start=after_start if self.has_lock() else None)
+        events = (EventKind.BEFORE_SHUTDOWN, EventKind.AFTER_START) if self.has_lock() else ()
+        command = self._lifecycle(CommandKind.RESTART, timeout=timeout, events=events)
+
+        def handle_event(event: EventRecord) -> None:
+            if event.kind == EventKind.BEFORE_SHUTDOWN:
+                before_shutdown()
+            elif event.kind == EventKind.AFTER_START:
+                after_start()
+
+        do_restart = functools.partial(self._run_command, command, handle_event)
         if self.is_synchronous_mode() and not self.has_lock():
             do_restart = functools.partial(self.while_not_sync_standby, do_restart)
 
@@ -2158,7 +2327,7 @@ class Ha(object):
                 return (False, PostgresqlState.RESTART_FAILED)
 
     def _do_reinitialize(self, cluster: Cluster, from_leader: bool = False) -> Optional[bool]:
-        self.state_handler.stop('immediate', stop_timeout=self.patroni.config['retry_timeout'])
+        self._stop_immediate()
         # Commented redundant data directory cleanup here
         # self.state_handler.remove_data_directory()
 
@@ -2184,6 +2353,7 @@ class Ha(object):
             cluster = self.cluster
 
         if force:
+            self._cancel_command()
             self._async_executor.cancel()
 
         with self._async_executor:
@@ -2211,17 +2381,14 @@ class Ha(object):
                 with self._async_response:
                     cancel = self._async_response.cancel()
                 if cancel:
-                    self.state_handler.cancellable.cancel()
+                    self._cancel_command()
                     return 'lost leader before promote'
 
             if self._pg_role() == PostgresqlRole.PRIMARY:
                 logger.info('Demoting primary during %s', self._async_executor.scheduled_action)
                 if self._async_executor.scheduled_action in ('restart', 'starting primary after failure'):
-                    # Restart needs a special interlocking cancel because postmaster may be just started in a
-                    # background thread and has not even written a pid file yet.
-                    with self._async_executor.critical_task as task:
-                        if not task.cancel() and isinstance(task.result, PostmasterProcess):
-                            self.state_handler.terminate_starting_postmaster(postmaster=task.result)
+                    # The agent interlocks cancellation with its local postmaster handle.
+                    self._cancel_command()
                 self.demote('immediate-nolock')
                 return 'lost leader lock during {0}'.format(self._async_executor.scheduled_action)
         if self.cluster.is_unlocked():
@@ -2251,7 +2418,7 @@ class Ha(object):
     def cancel_initialization(self) -> None:
         logger.info('removing initialize key after failed attempt to bootstrap the cluster')
         self.dcs.cancel_initialization()
-        self.state_handler.stop('immediate', stop_timeout=self.patroni.config['retry_timeout'])
+        self._stop_immediate()
         self.state_handler.move_data_directory()
         raise PatroniFatalException('Failed to bootstrap cluster')
 
@@ -2420,7 +2587,7 @@ class Ha(object):
 
             if not data_directory_is_accessible or data_directory_is_empty:
                 self.state_handler.set_role(PostgresqlRole.UNINITIALIZED)
-                self.state_handler.stop('immediate', stop_timeout=self.patroni.config['retry_timeout'])
+                self._stop_immediate()
                 # In case datadir went away while we were primary
                 self.watchdog.disable()
 
@@ -2577,6 +2744,7 @@ class Ha(object):
                 return 'Unexpected exception raised, please report it as a BUG'
 
     def shutdown(self) -> None:
+        self._cancel_command()
         self._async_executor.cancel()
         if self.is_paused():
             logger.info('Leader key is not deleted and Postgresql is not stopped due paused state')
@@ -2586,8 +2754,6 @@ class Ha(object):
             # takes longer than ttl, then leader key is lost and replication might not have sent out all WAL.
             # This might not be the desired behavior of users, as a graceful shutdown of the host can mean lost data.
             # We probably need to something smarter here.
-            disable_wd = self.watchdog.disable if self.watchdog.is_running else None
-
             status = {'deleted': False}
 
             def _on_shutdown(checkpoint_location: int, prev_location: int) -> None:
@@ -2606,12 +2772,29 @@ class Ha(object):
             def _before_shutdown() -> None:
                 self.notify_mpp_coordinator('before_demote')
 
-            on_shutdown = _on_shutdown if self.is_leader() else None
-            before_shutdown = _before_shutdown if self.is_leader() else None
-            self.while_not_sync_standby(lambda: self.state_handler.stop(checkpoint=False, on_safepoint=disable_wd,
-                                                                        on_shutdown=on_shutdown,
-                                                                        before_shutdown=before_shutdown,
-                                                                        stop_timeout=self.primary_stop_timeout()))
+            events: List[EventKind] = []
+            if self.watchdog.is_running:
+                events.append(EventKind.SAFEPOINT)
+            if self.is_leader():
+                events.extend((EventKind.SHUTDOWN, EventKind.BEFORE_SHUTDOWN))
+            command = self._lifecycle(
+                CommandKind.STOP,
+                timeout=self.primary_stop_timeout(),
+                stop_mode=StopMode.DEFAULT,
+                checkpoint=CheckpointMode.DISABLED,
+                events=tuple(events),
+            )
+
+            def handle_event(event: EventRecord) -> None:
+                if event.kind == EventKind.SAFEPOINT:
+                    self.watchdog.disable()
+                elif event.kind == EventKind.SHUTDOWN:
+                    _on_shutdown(cast(int, event.checkpoint_location), cast(int, event.previous_location))
+                elif event.kind == EventKind.BEFORE_SHUTDOWN:
+                    _before_shutdown()
+
+            stop = functools.partial(self._run_command, command, handle_event)
+            self.while_not_sync_standby(stop)
             if not self._is_running():
                 if self.is_leader() and not status['deleted']:
                     _, prev_location = self.state_handler.latest_checkpoint_locations()
