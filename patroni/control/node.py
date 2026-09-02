@@ -1,0 +1,380 @@
+"""Read-only controller boundary for coherent node observations."""
+import datetime
+import json
+
+from abc import ABC, abstractmethod
+from enum import Enum
+from threading import RLock
+from typing import Callable, cast, Dict, List, Mapping, Optional, Sequence, Tuple, Type
+from uuid import UUID
+
+from patroni.exceptions import PostgresConnectionException
+from patroni.psycopg import Error
+from patroni.utils import RetryFailedError
+
+from .models import Freshness, LocalPostgres, NodeSnapshot, ObservationContext, ObservationFailure, \
+    PostgresRole, PostgresState, QueryMode, ReplicationConnection, SnapshotDetail, TimelineWal, WalObservation
+
+MAX_CONSISTENCY_ATTEMPTS = 2
+MAX_REPLICATION_CONNECTIONS = 4096
+QUERY_STATES = frozenset((
+    PostgresState.RUNNING,
+    PostgresState.RESTARTING,
+    PostgresState.STARTING,
+))
+EMPTY_WAL = WalObservation(None, None, None, None, None)
+
+
+class PostgresObserver(ABC):
+    """Encapsulate local PostgreSQL reads below the collector."""
+
+    @abstractmethod
+    def read(self, detail: SnapshotDetail) -> LocalPostgres:
+        """Read local process state without SQL."""
+
+    @abstractmethod
+    def query_status(self, mode: QueryMode) -> Sequence[object]:
+        """Run the current REST status query."""
+
+    @abstractmethod
+    def replica_timeline(self, leader_timeline: Optional[int]) -> Optional[int]:
+        """Resolve the cached replica timeline."""
+
+    @abstractmethod
+    def replication_state(self, role: PostgresRole, receiver_state: Optional[str],
+                          restore_command: Optional[str]) -> Optional[str]:
+        """Interpret receiver state using current PostgreSQL rules."""
+
+    @abstractmethod
+    def is_primary(self) -> bool:
+        """Query whether PostgreSQL is out of recovery."""
+
+    @abstractmethod
+    def is_running(self) -> bool:
+        """Check for a live postmaster."""
+
+    @abstractmethod
+    def is_starting(self) -> bool:
+        """Check the current startup state."""
+
+    @abstractmethod
+    def last_operation(self) -> int:
+        """Read the current local WAL position."""
+
+    @abstractmethod
+    def timeline_wal(self) -> TimelineWal:
+        """Read coherent timeline and WAL positions."""
+
+    @abstractmethod
+    def current_replication_state(self) -> Optional[str]:
+        """Read the current receiver state."""
+
+    @abstractmethod
+    def received_timeline(self) -> Optional[int]:
+        """Read the receiver timeline."""
+
+    @abstractmethod
+    def control_timeline(self) -> Optional[int]:
+        """Read the control-file timeline."""
+
+    @abstractmethod
+    def postmaster_start(self) -> Optional[str]:
+        """Read postmaster start time."""
+
+    @abstractmethod
+    def server_version(self) -> int:
+        """Read connected PostgreSQL version."""
+
+
+class NodeControl(ABC):
+    """Expose bounded local observations to controller code."""
+
+    @abstractmethod
+    def snapshot(self, detail: SnapshotDetail, freshness: Freshness,
+                 context: ObservationContext) -> NodeSnapshot:
+        """Return one coherent local observation."""
+
+    @abstractmethod
+    def invalidate(self) -> None:
+        """End the current local snapshot cache scope."""
+
+    @abstractmethod
+    def is_primary(self) -> bool:
+        """Return current recovery state."""
+
+    @abstractmethod
+    def is_running(self) -> bool:
+        """Return postmaster process presence."""
+
+    @abstractmethod
+    def is_starting(self) -> bool:
+        """Return whether PostgreSQL is starting."""
+
+    @abstractmethod
+    def last_operation(self) -> int:
+        """Return current WAL position."""
+
+    @abstractmethod
+    def timeline_wal(self) -> TimelineWal:
+        """Return coherent timeline and WAL positions."""
+
+    @abstractmethod
+    def replication_state(self) -> Optional[str]:
+        """Return current replication state."""
+
+    @abstractmethod
+    def received_timeline(self) -> Optional[int]:
+        """Return current receiver timeline."""
+
+    @abstractmethod
+    def replica_timeline(self, leader_timeline: Optional[int]) -> Optional[int]:
+        """Return cached replica timeline for a leader timeline."""
+
+    @abstractmethod
+    def control_timeline(self) -> Optional[int]:
+        """Return current control-file timeline."""
+
+    @abstractmethod
+    def postmaster_start(self) -> Optional[str]:
+        """Return postmaster start time."""
+
+    @abstractmethod
+    def server_version(self) -> int:
+        """Return connected PostgreSQL version."""
+
+
+class InProcessNodeControl(NodeControl):
+    """Collect snapshots through the same API a future agent client uses."""
+
+    def __init__(self, agent_boot_id: str, observer: PostgresObserver,
+                 clock: Callable[[], float]) -> None:
+        if agent_boot_id != str(UUID(agent_boot_id)):
+            raise ValueError('agent_boot_id is not a canonical UUID')
+
+        self._agent_boot_id = agent_boot_id
+        self._observer = observer
+        self._clock = clock
+        self._lock = RLock()
+        self._sequence = 0
+        self._cache: Dict[SnapshotDetail, NodeSnapshot] = {}
+
+    def snapshot(self, detail: SnapshotDetail, freshness: Freshness,
+                 context: ObservationContext) -> NodeSnapshot:
+        """Return cached or request-time local state."""
+        _enum(detail, SnapshotDetail, 'snapshot detail')
+        _enum(freshness, Freshness, 'freshness')
+        _context(context)
+
+        with self._lock:
+            cached = self._cache.get(detail)
+            if freshness == Freshness.CACHED and cached:
+                return cached
+
+            self._sequence += 1
+            query_mode = QueryMode.RETRY if freshness == Freshness.FRESH_RETRY else QueryMode.ONCE
+            attempts = MAX_CONSISTENCY_ATTEMPTS if freshness == Freshness.FRESH_RETRY else 1
+            snapshot = self._collect(detail, context, query_mode, attempts)
+            self._cache[detail] = snapshot
+            return snapshot
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+    def is_primary(self) -> bool:
+        with self._lock:
+            return self._observer.is_primary()
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._observer.is_running()
+
+    def is_starting(self) -> bool:
+        with self._lock:
+            return self._observer.is_starting()
+
+    def last_operation(self) -> int:
+        with self._lock:
+            return self._observer.last_operation()
+
+    def timeline_wal(self) -> TimelineWal:
+        with self._lock:
+            return self._observer.timeline_wal()
+
+    def replication_state(self) -> Optional[str]:
+        with self._lock:
+            return self._observer.current_replication_state()
+
+    def received_timeline(self) -> Optional[int]:
+        with self._lock:
+            return self._observer.received_timeline()
+
+    def replica_timeline(self, leader_timeline: Optional[int]) -> Optional[int]:
+        with self._lock:
+            return self._observer.replica_timeline(leader_timeline)
+
+    def control_timeline(self) -> Optional[int]:
+        with self._lock:
+            return self._observer.control_timeline()
+
+    def postmaster_start(self) -> Optional[str]:
+        with self._lock:
+            return self._observer.postmaster_start()
+
+    def server_version(self) -> int:
+        with self._lock:
+            return self._observer.server_version()
+
+    def _collect(self, detail: SnapshotDetail, context: ObservationContext,
+                 query_mode: QueryMode, attempts: int) -> NodeSnapshot:
+        before = self._observer.read(detail)
+        for _ in range(attempts):
+            try:
+                row = self._observer.query_status(query_mode) \
+                    if detail == SnapshotDetail.STATUS and before.state in QUERY_STATES else None
+            except (Error, PostgresConnectionException, RetryFailedError):
+                return self._failed(detail, before, ObservationFailure.QUERY_FAILED)
+
+            after = self._observer.read(detail)
+            if before == after:
+                return self._build(detail, context, before, row)
+
+            before = self._observer.read(detail)
+
+        return self._failed(detail, before, ObservationFailure.INCONSISTENT)
+
+    def _build(self, detail: SnapshotDetail, context: ObservationContext,
+               local: LocalPostgres, row: Optional[Sequence[object]]) -> NodeSnapshot:
+        if row is None:
+            return self._snapshot(detail, local, local.observed_role, local.state)
+        if len(row) != 12:
+            return self._failed(detail, local, ObservationFailure.QUERY_FAILED)
+
+        role = PostgresRole.PRIMARY if bool(row[1]) else PostgresRole.REPLICA
+        is_primary = role == PostgresRole.PRIMARY
+        timeline = _integer(row[1]) if is_primary else self._observer.replica_timeline(context.leader_timeline)
+        wal = WalObservation(
+            _integer(row[2]) if is_primary else None,
+            None if is_primary else _integer(row[10]) or _integer(row[4]) or _integer(row[3]),
+            None if is_primary else _integer(row[3]),
+            None if is_primary else _datetime(row[6]),
+            None if is_primary else bool(row[5]),
+        )
+
+        replication = _replication(row[11])
+        if replication is None:
+            return self._failed(detail, local, ObservationFailure.LIMIT_EXCEEDED)
+
+        receiver_state = row[8] if isinstance(row[8], str) else None
+        restore_command = row[9] if isinstance(row[9], str) else None
+        replication_state = self._observer.replication_state(role, receiver_state, restore_command)
+
+        return self._snapshot(
+            detail,
+            local,
+            role,
+            local.state,
+            timeline,
+            wal,
+            _integer(row[7]),
+            replication_state,
+            replication,
+            _datetime(row[0]),
+            server_version=self._observer.server_version(),
+        )
+
+    def _failed(self, detail: SnapshotDetail, local: LocalPostgres,
+                failure: ObservationFailure) -> NodeSnapshot:
+        state = PostgresState.UNKNOWN if local.state in QUERY_STATES else local.state
+        role = PostgresRole.UNKNOWN if local.state in QUERY_STATES else local.observed_role
+        return self._snapshot(detail, local, role, state, failure=failure)
+
+    def _snapshot(self, detail: SnapshotDetail, local: LocalPostgres,
+                  role: PostgresRole, state: PostgresState,
+                  timeline: Optional[int] = None, wal: WalObservation = EMPTY_WAL,
+                  latest_end_lsn: Optional[int] = None,
+                  replication_state: Optional[str] = None,
+                  replication: Tuple[ReplicationConnection, ...] = (),
+                  postmaster_start_time: Optional[datetime.datetime] = None,
+                  server_version: int = 0,
+                  failure: ObservationFailure = ObservationFailure.NONE) -> NodeSnapshot:
+        return NodeSnapshot(
+            self._agent_boot_id,
+            self._sequence,
+            self._clock(),
+            detail,
+            role,
+            local.desired_role,
+            state,
+            local.supports_multiple_sync,
+            local.system_identifier,
+            server_version if failure == ObservationFailure.NONE else 0,
+            timeline,
+            wal,
+            latest_end_lsn,
+            replication_state,
+            replication,
+            postmaster_start_time,
+            local.pending_restart,
+            failure,
+        )
+
+
+def _integer(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+
+    if isinstance(value, (float, int, str)):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _datetime(value: object) -> Optional[datetime.datetime]:
+    return value if isinstance(value, datetime.datetime) else None
+
+
+def _replication(value: object) -> Optional[Tuple[ReplicationConnection, ...]]:
+    if not value:
+        return ()
+    if isinstance(value, str):
+        try:
+            value = cast(object, json.loads(value))
+        except (TypeError, ValueError):
+            return ()
+    if not isinstance(value, list):
+        return ()
+    items = cast(List[object], value)
+    if len(items) > MAX_REPLICATION_CONNECTIONS:
+        return None
+
+    connections: List[ReplicationConnection] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        data = cast(Mapping[str, object], item)
+        connections.append(ReplicationConnection(
+            str(data.get('application_name') or ''),
+            str(data['client_addr']) if data.get('client_addr') is not None else None,
+            str(data.get('state') or ''),
+            str(data.get('sync_state') or ''),
+            _integer(data.get('sync_priority')) or 0,
+            str(data.get('usename') or ''),
+        ))
+
+    return tuple(connections)
+
+
+def _enum(value: object, enum_type: Type[Enum], name: str) -> None:
+    if not isinstance(value, enum_type):
+        raise ValueError('invalid {0}'.format(name))
+
+
+def _context(value: object) -> None:
+    if not isinstance(value, ObservationContext):
+        raise ValueError('invalid observation context')

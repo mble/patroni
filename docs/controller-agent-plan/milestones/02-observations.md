@@ -1,5 +1,17 @@
 # M02: Coherent observations
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/models.py`, `patroni/control/node.py`,
+`patroni/control/postgres.py`, `patroni/api.py`, `patroni/ha.py`, and
+`tests/test_control_node.py`.
+
+HA and REST read local state through `NodeControl`. The in-process adapter
+preserves existing read timing, retry points, REST output, and HA cache points.
+Sixteen focused tests cover lifecycle states, failures, consistency, cache
+invalidation, connection fallback, bounds, and redaction. Existing HA and API
+tests remain differential parity tests.
+
 ## Goal
 
 Remove direct controller reads of PostgreSQL internals.

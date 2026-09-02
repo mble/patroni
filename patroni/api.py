@@ -25,16 +25,82 @@ from urllib.parse import parse_qs, urlparse
 
 import dateutil.parser
 
-from . import global_config, psycopg
+from . import global_config
 from .__main__ import Patroni
+from .control import Freshness, NodeSnapshot, ObservationContext, PendingRestart, \
+    PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, SnapshotDetail
 from .dcs import Cluster
-from .exceptions import PostgresConnectionException, PostgresException
+from .exceptions import PostgresException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
 from .thread_pool import PatroniThreadPoolExecutor
-from .utils import cluster_as_json, deep_compare, enable_keepalive, parse_bool, \
-    parse_int, patch_config, Retry, RetryFailedError, split_host_port, tzutc, uri
+from .utils import cluster_as_json, deep_compare, enable_keepalive, \
+    parse_bool, parse_int, patch_config, split_host_port, tzutc, uri
 
 logger = logging.getLogger(__name__)
+
+
+def _postgres_role(role: ControlPostgresRole) -> Union[PostgresqlRole, str]:
+    """Map the boundary role to the stable REST representation."""
+    if role == ControlPostgresRole.UNKNOWN:
+        return role.value
+
+    return PostgresqlRole(role.value)
+
+
+def _postgres_state(state: ControlPostgresState) -> Union[PostgresqlState, str]:
+    """Map the boundary state to the stable REST representation."""
+    if state == ControlPostgresState.UNKNOWN:
+        return state.value
+
+    return PostgresqlState(state.value)
+
+
+def _restart_reason(items: Tuple[PendingRestart, ...]) -> Dict[str, Dict[str, object]]:
+    """Restore the existing public pending-restart shape."""
+    return {
+        item.name: {'old_value': item.old_value, 'new_value': item.new_value}
+        for item in items
+    }
+
+
+def _status_from_snapshot(snapshot: NodeSnapshot) -> Dict[str, Any]:
+    """Compose the existing REST fields from one node snapshot."""
+    role = snapshot.observed_role
+    if role == ControlPostgresRole.UNKNOWN:
+        role = snapshot.desired_role
+
+    result: Dict[str, Any] = {
+        'state': _postgres_state(snapshot.postgres_state),
+        'role': _postgres_role(role),
+    }
+    if snapshot.system_identifier:
+        result['database_system_identifier'] = snapshot.system_identifier
+    if snapshot.pending_restart:
+        result['pending_restart'] = True
+        result['pending_restart_reason'] = _restart_reason(snapshot.pending_restart)
+    if not snapshot.server_version:
+        return result
+
+    result['postmaster_start_time'] = snapshot.postmaster_start_time
+    result['server_version'] = snapshot.server_version
+    result['timeline'] = snapshot.timeline
+    if snapshot.observed_role == ControlPostgresRole.PRIMARY:
+        result['xlog'] = {'location': snapshot.wal.location}
+    else:
+        result['xlog'] = {
+            'received_location': snapshot.wal.received_location,
+            'replayed_location': snapshot.wal.replayed_location,
+            'replayed_timestamp': snapshot.wal.replayed_timestamp,
+            'paused': snapshot.wal.paused,
+        }
+    if snapshot.latest_end_lsn:
+        result['latest_end_lsn'] = snapshot.latest_end_lsn
+    if snapshot.replication_state:
+        result['replication_state'] = snapshot.replication_state
+    if snapshot.replication:
+        result['replication'] = [dict(item._asdict()) for item in snapshot.replication]
+
+    return result
 
 
 def check_access(*args: Any, **kwargs: Any) -> Callable[..., Any]:
@@ -217,15 +283,10 @@ class RestApiHandler(BaseHTTPRequestHandler):
         tags = patroni.ha.get_effective_tags()
         if tags:
             response['tags'] = tags
-        if patroni.postgresql.sysid:
-            response['database_system_identifier'] = patroni.postgresql.sysid
-        if patroni.postgresql.pending_restart_reason:
-            response['pending_restart'] = True
-            response['pending_restart_reason'] = dict(patroni.postgresql.pending_restart_reason)
         response['patroni'] = {
             'version': patroni.version,
-            'scope': patroni.postgresql.scope,
-            'name': patroni.postgresql.name
+            'scope': patroni.config['scope'],
+            'name': patroni.config['name'],
         }
 
         if patroni.site:
@@ -458,7 +519,9 @@ class RestApiHandler(BaseHTTPRequestHandler):
 
         """
         patroni: Patroni = self.server.patroni
-        is_primary = patroni.postgresql.role == PostgresqlRole.PRIMARY and patroni.postgresql.is_running()
+        snapshot = self._get_node_snapshot(SnapshotDetail.BASIC, Freshness.FRESH)
+        is_primary = snapshot.desired_role == ControlPostgresRole.PRIMARY \
+            and patroni.node.is_running()
         # We can tolerate Patroni problems longer on the replica.
         # On the primary the liveness probe most likely will start failing only after the leader key expired.
         # It should not be a big problem because replicas will see that the primary is still alive via REST API call.
@@ -479,10 +542,11 @@ class RestApiHandler(BaseHTTPRequestHandler):
             return
 
         # When postgres is not running we are not ready.
-        if patroni.postgresql.state != PostgresqlState.RUNNING:
+        snapshot = self._get_node_snapshot(SnapshotDetail.BASIC, Freshness.FRESH)
+        if snapshot.postgres_state != ControlPostgresState.RUNNING:
             return 'PostgreSQL is not running'
 
-        postgres = self.get_postgresql_status(True)
+        postgres = self.get_postgresql_status(Freshness.FRESH_RETRY)
         latest_end_lsn = postgres.get('latest_end_lsn', 0)
 
         if postgres.get('replication_state') != 'streaming':
@@ -542,7 +606,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         Write an HTTP response through :func:`_write_status_response`, with HTTP status ``200`` and the status of
         Postgres.
         """
-        response = self.get_postgresql_status(True)
+        response = self.get_postgresql_status(Freshness.FRESH_RETRY)
         response.pop('latest_end_lsn', None)
         self._write_status_response(200, response)
 
@@ -555,7 +619,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         cluster = self.server.patroni.dcs.get_cluster()
 
         response = cluster_as_json(cluster)
-        response['scope'] = self.server.patroni.postgresql.scope
+        response['scope'] = self.server.patroni.config['scope']
         self._write_json_response(200, response)
 
     def do_GET_history(self) -> None:
@@ -635,13 +699,13 @@ class RestApiHandler(BaseHTTPRequestHandler):
             * ``patroni_postgres_in_archive_recovery``: ``1`` if Postgres isn't streaming and
               there is ``restore_command`` available, else ``0``.
         """
-        postgres = self.get_postgresql_status(True)
+        postgres = self.get_postgresql_status(Freshness.FRESH_RETRY)
         patroni = self.server.patroni
         epoch = datetime.datetime(1970, 1, 1, tzinfo=tzutc)
 
         metrics: List[str] = []
 
-        labels = f'{{scope="{patroni.postgresql.scope}",name="{patroni.postgresql.name}"}}'
+        labels = f'{{scope="{patroni.config["scope"]}",name="{patroni.config["name"]}"}}'
         metrics.append("# HELP patroni_version Patroni semver without periods.")
         metrics.append("# TYPE patroni_version gauge")
         padded_semver = ''.join([x.zfill(2) for x in patroni.version.split('.')])  # 2.0.2 => 020002
@@ -738,7 +802,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         metrics.append("patroni_failsafe_mode_enabled{0} {1}".format(labels, int(patroni.ha.is_failsafe_mode())))
 
         failsafe = patroni.dcs.failsafe
-        is_failsafe_member = isinstance(failsafe, dict) and patroni.postgresql.name in failsafe
+        is_failsafe_member = isinstance(failsafe, dict) and patroni.config['name'] in failsafe
         metrics.append("# HELP patroni_failsafe_member Value is 1 if this node is a member of failsafe, 0 otherwise.")
         metrics.append("# TYPE patroni_failsafe_member gauge")
         metrics.append("patroni_failsafe_member{0} {1}".format(labels, int(is_failsafe_member)))
@@ -755,7 +819,7 @@ class RestApiHandler(BaseHTTPRequestHandler):
         metrics.append("# HELP patroni_pending_restart Value is 1 if the node needs a restart, 0 otherwise.")
         metrics.append("# TYPE patroni_pending_restart gauge")
         metrics.append("patroni_pending_restart{0} {1}"
-                       .format(labels, int(bool(patroni.postgresql.pending_restart_reason))))
+                       .format(labels, int(bool(postgres.get('pending_restart')))))
 
         metrics.append("# HELP patroni_is_paused Value is 1 if auto failover is disabled, 0 otherwise.")
         metrics.append("# TYPE patroni_is_paused gauge")
@@ -1361,25 +1425,21 @@ class RestApiHandler(BaseHTTPRequestHandler):
                 self.command = mname
         return ret
 
-    def query(self, sql: str, *params: Any, retry: bool = False) -> List[Tuple[Any, ...]]:
-        """Execute *sql* query with *params* and optionally return results.
+    def _get_node_snapshot(self, detail: SnapshotDetail, freshness: Freshness) -> NodeSnapshot:
+        """Collect local state with controller-owned DCS context."""
+        patroni = self.server.patroni
+        cluster = patroni.dcs.cluster
+        leader_timeline = None if not cluster or cluster.is_unlocked() or not cluster.leader \
+            else cluster.leader.timeline
 
-        :param sql: the SQL statement to be run.
-        :param params: positional arguments to call :func:`RestApiServer.query` with.
-        :param retry: whether the query should be retried upon failure or given up immediately.
+        return patroni.node.snapshot(detail, freshness, ObservationContext(leader_timeline))
 
-        :returns: a list of rows that were fetched from the database.
-        """
-        if not retry:
-            return self.server.query(sql, *params)
-        return Retry(delay=1, retry_exceptions=PostgresConnectionException)(self.server.query, sql, *params)
-
-    def get_postgresql_status(self, retry: bool = False) -> Dict[str, Any]:
+    def get_postgresql_status(self, freshness: Freshness = Freshness.FRESH) -> Dict[str, Any]:
         """Builds an object representing a status of "postgres".
 
-        Some of the values are collected by executing a query and other are taken from the state stored in memory.
+        Local values come from one immutable node snapshot. DCS values remain controller-owned.
 
-        :param retry: whether the query should be retried if failed or give up immediately
+        :param freshness: snapshot collection and retry policy.
 
         :returns: a dict with the status of Postgres/Patroni. The keys are:
 
@@ -1421,81 +1481,26 @@ class RestApiHandler(BaseHTTPRequestHandler):
             * ``dcs_last_seen``: epoch timestamp DCS was last reached by Patroni.
 
         """
-        postgresql = self.server.patroni.postgresql
-        cluster = self.server.patroni.dcs.cluster
+        patroni = self.server.patroni
+        cluster = patroni.dcs.cluster
         config = global_config.from_cluster(cluster)
-        try:
+        snapshot = self._get_node_snapshot(SnapshotDetail.STATUS, freshness)
+        result = _status_from_snapshot(snapshot)
 
-            if postgresql.state not in (PostgresqlState.RUNNING, PostgresqlState.RESTARTING,
-                                        PostgresqlState.STARTING):
-                raise RetryFailedError('')
-            replication_state = ("pg_catalog.pg_{0}_{1}_diff(wr.latest_end_lsn, '0/0')::bigint, wr.status"
-                                 if postgresql.major_version >= 90600 else "NULL, NULL") + ", " +\
-                ("pg_catalog.current_setting('restore_command')" if postgresql.major_version >= 120000 else "NULL") +\
-                ", " + ("pg_catalog.pg_wal_lsn_diff(wr.written_lsn, '0/0')::bigint"
-                        if postgresql.major_version >= 130000 else "NULL")
-            stmt = ("SELECT " + postgresql.POSTMASTER_START_TIME + ", " + postgresql.TL_LSN + ","
-                    " pg_catalog.pg_last_xact_replay_timestamp(), " + replication_state + ","
-                    " (SELECT pg_catalog.array_to_json(pg_catalog.array_agg(pg_catalog.row_to_json(ri))) "
-                    "FROM (SELECT (SELECT rolname FROM pg_catalog.pg_authid WHERE oid = usesysid) AS usename,"
-                    " application_name, client_addr, w.state, sync_state, sync_priority"
-                    " FROM pg_catalog.pg_stat_get_wal_senders() w, pg_catalog.pg_stat_get_activity(pid)) AS ri)") +\
-                (" FROM pg_catalog.pg_stat_get_wal_receiver() AS wr" if postgresql.major_version >= 90600 else "")
+        if result['role'] == PostgresqlRole.REPLICA and config.is_standby_cluster:
+            result['role'] = _postgres_role(snapshot.desired_role)
 
-            row = self.query(stmt.format(postgresql.wal_name, postgresql.lsn_name,
-                                         postgresql.wal_flush), retry=retry)[0]
-            result = {
-                'state': postgresql.state,
-                'postmaster_start_time': row[0],
-                'role': PostgresqlRole.REPLICA if row[1] == 0 else PostgresqlRole.PRIMARY,
-                'server_version': postgresql.server_version,
-                'xlog': ({
-                    'received_location': row[10] or row[4] or row[3],
-                    'replayed_location': row[3],
-                    'replayed_timestamp': row[6],
-                    'paused': row[5]} if row[1] == 0 else {
-                    'location': row[2]
-                })
-            }
-
-            if result['role'] == PostgresqlRole.REPLICA and config.is_standby_cluster:
-                result['role'] = postgresql.role
-
-            if result['role'] == PostgresqlRole.REPLICA and config.is_synchronous_mode\
-                    and cluster and cluster.sync.matches(postgresql.name):
-                result['quorum_standby' if global_config.is_quorum_commit_mode else 'sync_standby'] = True
-
-            if row[1] > 0:
-                result['timeline'] = row[1]
-            else:
-                leader_timeline = None\
-                    if not cluster or cluster.is_unlocked() or not cluster.leader else cluster.leader.timeline
-                result['timeline'] = postgresql.replica_cached_timeline(leader_timeline)
-
-            if row[7]:
-                result['latest_end_lsn'] = row[7]
-
-            replication_state = postgresql.replication_state_from_parameters(row[1] > 0, row[8], row[9])
-            if replication_state:
-                result['replication_state'] = replication_state
-
-            if row[11]:
-                result['replication'] = row[11]
-
-        except (psycopg.Error, RetryFailedError, PostgresConnectionException):
-            state = postgresql.state
-            if state == PostgresqlState.RUNNING:
-                logger.exception('get_postgresql_status')
-                state = 'unknown'
-            result: Dict[str, Any] = {'state': state, 'role': postgresql.role}
+        if result['role'] == PostgresqlRole.REPLICA and config.is_synchronous_mode \
+                and cluster and cluster.sync.matches(patroni.config['name']):
+            result['quorum_standby' if global_config.is_quorum_commit_mode else 'sync_standby'] = True
 
         if config.is_paused:
             result['pause'] = True
         if not cluster or cluster.is_unlocked():
             result['cluster_unlocked'] = True
-        if self.server.patroni.ha.failsafe_is_active():
+        if patroni.ha.failsafe_is_active():
             result['failsafe_mode_is_active'] = True
-        result['dcs_last_seen'] = self.server.patroni.dcs.last_seen
+        result['dcs_last_seen'] = patroni.dcs.last_seen
         return result
 
     def handle_one_request(self) -> None:
@@ -1590,37 +1595,6 @@ class RestApiServer(ThreadingMixIn, HTTPServer):
             logger.warning('restapi.server_tokens is set to "%s". Patroni will not modify the Server header. '
                            'Valid values are: "Minimal", "ProductOnly".', token_config)
             return ""
-
-    def query(self, sql: str, *params: Any) -> List[Tuple[Any, ...]]:
-        """Execute *sql* query with *params* and optionally return results.
-
-        .. note::
-            Prefer to use own connection to postgres and fallback to ``heartbeat`` when own isn't available.
-
-        :param sql: the SQL statement to be run.
-        :param params: positional arguments to be used as parameters for *sql*.
-
-        :returns: a list of rows that were fetched from the database.
-
-        :raises:
-            :class:`psycopg.Error`: if had issues while executing *sql*.
-            :class:`~patroni.exceptions.PostgresConnectionException`: if had issues while connecting to the database.
-        """
-        # We first try to get a heartbeat connection because it is always required for the main thread.
-        try:
-            heartbeat_connection = self.patroni.postgresql.connection_pool.get('heartbeat')
-            heartbeat_connection.get()  # try to open psycopg connection to postgres
-        except psycopg.Error as exc:
-            raise PostgresConnectionException('connection problems') from exc
-
-        try:
-            connection = self.patroni.postgresql.connection_pool.get('restapi')
-            connection.get()  # try to open psycopg connection to postgres
-        except psycopg.Error:
-            logger.debug('restapi connection to postgres is not available')
-            connection = heartbeat_connection
-
-        return connection.query(sql, *params)
 
     @staticmethod
     def _set_fd_cloexec(fd: socket.socket) -> None:

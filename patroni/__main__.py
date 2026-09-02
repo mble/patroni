@@ -11,6 +11,7 @@ import time
 
 from argparse import Namespace
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from uuid import uuid4
 
 from patroni import global_config, MIN_PSYCOPG2, MIN_PSYCOPG3, parse_version
 from patroni.collections import EMPTY_DICT
@@ -56,6 +57,8 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         """
         from patroni import thread_pool
         from patroni.api import RestApiServer
+        from patroni.control import InProcessNodeControl
+        from patroni.control.postgres import LocalPostgresObserver
         from patroni.dcs import get_dcs
         from patroni.ha import Ha
         from patroni.postgresql import Postgresql
@@ -88,6 +91,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         global_config.update(None, self.config.dynamic_configuration)
 
         self.postgresql = Postgresql(self.config['postgresql'], self.dcs.mpp)
+        self.node = InProcessNodeControl(str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic)
         self.api = RestApiServer(self, self.config['restapi'])
         self.ha = Ha(self)
 

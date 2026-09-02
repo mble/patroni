@@ -1,6 +1,8 @@
 """Immutable controller-agent domain models."""
+import datetime
+
 from enum import Enum
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Tuple
 
 
 class AgentState(str, Enum):
@@ -82,9 +84,65 @@ class PostgresRole(str, Enum):
     """PostgreSQL role relevant to primary safety."""
 
     UNKNOWN = 'unknown'
-    STOPPED = 'stopped'
+    UNINITIALIZED = 'uninitialized'
     PRIMARY = 'primary'
+    MASTER = 'master'
+    STANDBY_LEADER = 'standby_leader'
     REPLICA = 'replica'
+    DEMOTED = 'demoted'
+    PROMOTED = 'promoted'
+
+
+class PostgresState(str, Enum):
+    """PostgreSQL lifecycle state exposed across the boundary."""
+
+    UNKNOWN = 'unknown'
+    INITDB = 'initializing new cluster'
+    INITDB_FAILED = 'initdb failed'
+    CUSTOM_BOOTSTRAP = 'running custom bootstrap script'
+    CUSTOM_BOOTSTRAP_FAILED = 'custom bootstrap failed'
+    CREATING_REPLICA = 'creating replica'
+    RUNNING = 'running'
+    STARTING = 'starting'
+    BOOTSTRAP_STARTING = 'starting after custom bootstrap'
+    START_FAILED = 'start failed'
+    RESTARTING = 'restarting'
+    RESTART_FAILED = 'restart failed'
+    STOPPING = 'stopping'
+    STOPPED = 'stopped'
+    STOP_FAILED = 'stop failed'
+    CRASHED = 'crashed'
+
+
+class Freshness(str, Enum):
+    """Snapshot collection policy."""
+
+    CACHED = 'cached'
+    FRESH = 'fresh'
+    FRESH_RETRY = 'fresh_retry'
+
+
+class QueryMode(str, Enum):
+    """PostgreSQL query retry policy."""
+
+    ONCE = 'once'
+    RETRY = 'retry'
+
+
+class SnapshotDetail(str, Enum):
+    """Bounded observation set."""
+
+    BASIC = 'basic'
+    STATUS = 'status'
+
+
+class ObservationFailure(str, Enum):
+    """Non-sensitive observation failure."""
+
+    NONE = 'none'
+    QUERY_FAILED = 'query_failed'
+    INCONSISTENT = 'inconsistent'
+    LIMIT_EXCEEDED = 'limit_exceeded'
 
 
 class SafetyAction(str, Enum):
@@ -94,6 +152,85 @@ class SafetyAction(str, Enum):
     RUN = 'run'
     REJECT = 'reject'
     FENCE = 'fence'
+
+
+class PendingRestart(NamedTuple):
+    """One PostgreSQL parameter requiring restart."""
+
+    name: str
+    old_value: object
+    new_value: object
+
+
+class LocalPostgres(NamedTuple):
+    """Atomic local state read by the PostgreSQL observer."""
+
+    state: PostgresState
+    observed_role: PostgresRole
+    desired_role: PostgresRole
+    system_identifier: str
+    supports_multiple_sync: bool
+    pending_restart: Tuple[PendingRestart, ...]
+
+
+class ObservationContext(NamedTuple):
+    """Public cluster facts needed to interpret local status."""
+
+    leader_timeline: Optional[int]
+
+
+class WalObservation(NamedTuple):
+    """Coherent WAL fields from one status query."""
+
+    location: Optional[int]
+    received_location: Optional[int]
+    replayed_location: Optional[int]
+    replayed_timestamp: Optional[datetime.datetime]
+    paused: Optional[bool]
+
+
+class ReplicationConnection(NamedTuple):
+    """Bounded public replication connection fields."""
+
+    application_name: str
+    client_addr: Optional[str]
+    state: str
+    sync_state: str
+    sync_priority: int
+    usename: str
+
+
+class TimelineWal(NamedTuple):
+    """Timeline and WAL positions from one PostgreSQL query."""
+
+    timeline: int
+    wal_position: int
+    control_timeline: Optional[int]
+    receive_lsn: Optional[int]
+    replay_lsn: Optional[int]
+
+
+class NodeSnapshot(NamedTuple):
+    """Immutable coherent local node observation."""
+
+    agent_boot_id: str
+    sequence: int
+    collected_at: float
+    detail: SnapshotDetail
+    observed_role: PostgresRole
+    desired_role: PostgresRole
+    postgres_state: PostgresState
+    supports_multiple_sync: bool
+    system_identifier: str
+    server_version: int
+    timeline: Optional[int]
+    wal: WalObservation
+    latest_end_lsn: Optional[int]
+    replication_state: Optional[str]
+    replication: Tuple[ReplicationConnection, ...]
+    postmaster_start_time: Optional[datetime.datetime]
+    pending_restart: Tuple[PendingRestart, ...]
+    failure: ObservationFailure
 
 
 class Timing(NamedTuple):

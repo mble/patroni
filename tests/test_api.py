@@ -1,4 +1,5 @@
 import datetime
+import inspect
 import json
 import socket
 import unittest
@@ -9,15 +10,16 @@ from unittest.mock import Mock, patch, PropertyMock
 
 from patroni import global_config
 from patroni.api import RestApiHandler, RestApiServer
+from patroni.control import Freshness, InProcessNodeControl, NodeSnapshot, ObservationFailure, \
+    PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, SnapshotDetail, WalObservation
+from patroni.control.postgres import LocalPostgresObserver
 from patroni.dcs import ClusterConfig, Member
-from patroni.exceptions import PostgresConnectionException
 from patroni.ha import _MemberStatus
 from patroni.postgresql.config import get_param_diff
 from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
-from patroni.psycopg import OperationalError
 from patroni.utils import RetryFailedError, tzutc
 
-from . import MockConnect, psycopg_connect
+from . import psycopg_connect
 from .test_etcd import socket_getaddrinfo
 from .test_ha import get_cluster_initialized_without_leader
 
@@ -59,6 +61,7 @@ class MockPostgresql:
     wal_name = 'wal'
     lsn_name = 'lsn'
     wal_flush = '_flush'
+    supports_multiple_sync = True
     POSTMASTER_START_TIME = 'pg_catalog.pg_postmaster_start_time()'
     TL_LSN = 'CASE WHEN pg_catalog.pg_is_in_recovery()'
     mpp_handler = Mock()
@@ -158,6 +161,10 @@ class MockPatroni(object):
     ha = MockHa()
     site = 'dc1'
     postgresql = ha.state_handler
+    node = InProcessNodeControl(
+        '969f3621-dbec-4835-84d1-263e5285ad21', LocalPostgresObserver(postgresql), lambda: 1.0,
+    )
+    config = {'scope': 'dummy', 'name': 'test'}
     dcs = Mock()
     logger = MockLogger()
     tags = {"key1": True, "key2": False, "key3": 1, "key4": 1.4, "key5": "RandomTag"}
@@ -209,6 +216,31 @@ class TestRestApiHandler(unittest.TestCase):
 
     _authorization = '\nAuthorization: Basic dGVzdDp0ZXN0'
 
+    def test_status_uses_node_snapshot(self):
+        snapshot = NodeSnapshot(
+            '4a207a9e-31b3-46a0-a0c2-a5571e6dca39', 1, 1.0, SnapshotDetail.STATUS,
+            ControlPostgresRole.PRIMARY, ControlPostgresRole.PRIMARY, ControlPostgresState.RUNNING,
+            True,
+            'dummysysid', 90625, 1, WalObservation(1, None, None, None, None), None, None, (),
+            postmaster_start_time, (), ObservationFailure.NONE,
+        )
+        node = Mock()
+        node.snapshot.return_value = snapshot
+
+        with patch.object(MockPatroni, 'node', node):
+            MockRestApiServer(RestApiHandler, 'GET /patroni')
+
+        node.snapshot.assert_called_once()
+        self.assertEqual(node.snapshot.call_args.args[1], Freshness.FRESH_RETRY)
+
+    def test_rest_has_no_direct_observations(self):
+        source = inspect.getsource(RestApiHandler)
+
+        for access in ('.postgresql.state', '.postgresql.role', '.postgresql.is_running',
+                       '.postgresql.sysid', '.postgresql.server_version',
+                       '.postgresql.pending_restart_reason'):
+            self.assertNotIn(access, source)
+
     def test_do_GET(self):
         MockPostgresql.pending_restart_reason = {'max_connections': get_param_diff('200', '100')}
         MockPatroni.dcs.cluster.status.last_lsn = 20
@@ -252,9 +284,7 @@ class TestRestApiHandler(unittest.TestCase):
         with patch.object(MockHa, 'restart_scheduled', Mock(return_value=True)):
             MockRestApiServer(RestApiHandler, 'GET /primary')
         self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /primary'))
-        with patch.object(RestApiServer, 'query',
-                          Mock(return_value=[('', 1, '', '', '', '', False, None, 0, None, 0, '')])):
-            self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /patroni'))
+        self.assertIsNotNone(MockRestApiServer(RestApiHandler, 'GET /patroni'))
         with patch.object(global_config.__class__, 'is_standby_cluster', Mock(return_value=True)), \
                 patch.object(global_config.__class__, 'is_paused', Mock(return_value=True)):
             MockRestApiServer(RestApiHandler, 'GET /standby_leader')
@@ -941,14 +971,6 @@ class TestRestApiServer(unittest.TestCase):
 
             self.srv.reload_config({'listen': ':8008'})
             self.assertIsNone(self.srv.ssl_not_after)
-
-    def test_query(self):
-        with patch.object(MockConnection, 'get', Mock(side_effect=OperationalError)):
-            self.assertRaises(PostgresConnectionException, self.srv.query, 'SELECT 1')
-        with patch.object(MockConnection, 'get', Mock(side_effect=[MockConnect(), OperationalError])), \
-                patch.object(MockConnection, 'query') as mock_query:
-            self.srv.query('SELECT 1')
-            mock_query.assert_called_once_with('SELECT 1')
 
     def test_construct_server_tokens(self):
         #

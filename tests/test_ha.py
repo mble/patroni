@@ -1,4 +1,5 @@
 import datetime
+import inspect
 import os
 import sys
 
@@ -9,6 +10,8 @@ import etcd
 from patroni import global_config
 from patroni.collections import CaseInsensitiveSet
 from patroni.config import Config
+from patroni.control import InProcessNodeControl
+from patroni.control.postgres import LocalPostgresObserver
 from patroni.dcs import Cluster, ClusterConfig, Failover, get_dcs, \
     Leader, Member, RemoteMember, Status, SyncState, TimelineHistory
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
@@ -156,6 +159,9 @@ zookeeper:
         self.config = Config(None)
         self.version = '1.5.7'
         self.postgresql = p
+        self.node = InProcessNodeControl(
+            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0,
+        )
         self.dcs = d
         self.api = Mock()
         self.tags = {'foo': 'bar'}
@@ -238,6 +244,16 @@ class TestHa(PostgresInit):
         self.ha.cluster = get_cluster_initialized_without_leader()
         global_config.update(self.ha.cluster)
         self.ha.load_cluster_from_dcs = Mock()
+
+    def test_ha_uses_node_observations(self):
+        source = inspect.getsource(Ha)
+
+        for access in ('self.state_handler.state', 'self.state_handler.role',
+                       'self.state_handler.is_running', 'self.state_handler.is_primary',
+                       'self.state_handler.last_operation', 'self.state_handler.timeline_wal_position',
+                       'self.state_handler.sysid', 'self.state_handler.server_version',
+                       'self.state_handler.pending_restart_reason'):
+            self.assertNotIn(access, source)
 
     def test_update_lock(self):
         self.ha.is_failsafe_mode = true
