@@ -29,6 +29,11 @@ FAILSAFE_PRIMARY_COMMANDS = frozenset((
     CommandKind.APPLY_SLOTS,
     CommandKind.CHECKPOINT,
 ))
+INITIALIZER_PRIMARY_COMMANDS = frozenset((
+    CommandKind.POST_BOOTSTRAP,
+    CommandKind.SET_BOOTSTRAP,
+    CommandKind.CHECKPOINT,
+))
 PHASE_ORDER = {
     CommandPhase.ACCEPTED: 0,
     CommandPhase.PREPARING: 1,
@@ -198,6 +203,14 @@ class SafetyState:
         """Record controller loss while retaining the current deadline."""
         self._connected = False
 
+    def rebind(self, controller_boot_id: str, sequence: int) -> None:
+        """Adopt a restarted controller without extending existing evidence."""
+        _boot_id(controller_boot_id, 'controller_boot_id')
+        _counter(sequence, 'sequence')
+        self._controller_boot_id = controller_boot_id
+        self._last_sequence = sequence
+        self._connected = True
+
     def fence(self) -> SafetyAction:
         """Preempt work and request unconditional fencing."""
         return self._start_fence()
@@ -224,6 +237,9 @@ class SafetyState:
             return True
 
         authority = self._current_authority()
+        is_active = request.command_id == self._active_command_id
+        if authority and not is_active and authority.controller_boot_id != request.controller_boot_id:
+            authority = None
         if request.kind == CommandKind.BOOTSTRAP:
             return bool(authority and authority.term == request.authority_term
                         and authority.kind == AuthorityKind.INITIALIZER)
@@ -232,6 +248,8 @@ class SafetyState:
                 return False
             if authority.kind == AuthorityKind.LEADER:
                 return True
+            if authority.kind == AuthorityKind.INITIALIZER:
+                return request.kind in INITIALIZER_PRIMARY_COMMANDS
 
             return authority.kind == AuthorityKind.FAILSAFE and request.kind in FAILSAFE_PRIMARY_COMMANDS
 

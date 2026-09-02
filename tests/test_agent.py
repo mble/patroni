@@ -3,7 +3,7 @@ import unittest
 
 from unittest.mock import Mock, patch
 
-from patroni.agent import _reject_dcs, DCS_SECTIONS, PatroniAgent
+from patroni.agent import _control_config, _reject_dcs, DCS_SECTIONS, PatroniAgent
 from patroni.agent_supervisor import AgentSupervisor, SIGNAL_EXIT_OFFSET
 from patroni.control import CommandKind, CommandState, PolicyMode, SubmitState
 from patroni.exceptions import PatroniFatalException
@@ -21,6 +21,15 @@ class TestPatroniAgent(unittest.TestCase):
             with self.subTest(section=section), self.assertRaises(PatroniFatalException):
                 _reject_dcs({section: {'host': 'dcs'}})
 
+    def test_controller_credentials_are_rejected(self) -> None:
+        for section in ('controller', 'restapi', 'ctl'):
+            with self.subTest(section=section), self.assertRaises(PatroniFatalException):
+                _reject_dcs({section: {'authentication': {'password': 'secret'}}})
+
+    def test_control_socket_must_be_absolute(self) -> None:
+        with self.assertRaises(PatroniFatalException):
+            _control_config({'agent': {'socket': 'agent.sock'}})
+
     @patch('patroni.agent.AbstractPatroniDaemon.__init__')
     @patch('patroni.agent.UnixServer')
     @patch('patroni.agent.AgentRpc')
@@ -33,7 +42,8 @@ class TestPatroniAgent(unittest.TestCase):
     @patch('patroni.agent.Watchdog')
     @patch('patroni.agent.get_mpp')
     @patch('patroni.agent.global_config.update')
-    def test_agent_constructs_no_dcs_client(self, update, get_mpp, watchdog, postgresql,
+    @patch('patroni.agent.AgentConfigManager')
+    def test_agent_constructs_no_dcs_client(self, config_manager, update, get_mpp, watchdog, postgresql,
                                             recovery, replication, driver, commands, node, rpc,
                                             server, daemon_init) -> None:
         config = AgentConfig(
@@ -44,6 +54,7 @@ class TestPatroniAgent(unittest.TestCase):
         agent = PatroniAgent(config, Mock())
 
         postgresql.assert_called_once_with(config['postgresql'], get_mpp.return_value)
+        config_manager.assert_called_once_with(config, postgresql.return_value)
         self.assertEqual(node.return_value, agent.node)
         server.assert_called_once()
 

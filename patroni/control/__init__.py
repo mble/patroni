@@ -3,14 +3,15 @@ from .commands import AckState, AgentCommands, BootstrapState, CallbackKind, Can
     CloneMode, CommandDriver, CommandResult, CommandSubmission, CommandValue, DivergencePolicy, DriverResult, \
     EventChannel, EventKind, EventRecord, FollowTarget, LifecycleCommand, RecoveryTarget, ReloadMode, \
     SlotAction, SlotMode, SlotPlan, StopMode, SubmitState, SyncAction, SyncCount, SyncPlan, TargetKind
-from .models import AgentState, AuthorityGrant, AuthorityKind, AuthorityState, CommandKind, CommandPhase, \
-    CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigChange, DesiredRole, Freshness, LocalPostgres, \
-    NodeSnapshot, ObservationContext, ObservationFailure, PendingRestart, PolicyMode, PostgresRole, PostgresState, \
-    QueryMode, RecoverySnapshot, ReplicationConnection, SafetyAction, SafetySnapshot, SlotCapabilities, SlotContext, \
-    SlotKind, SlotMember, SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, \
-    TimelineWal, Timing, WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
+from .models import AgentState, AgentTelemetry, AuthorityGrant, AuthorityKind, AuthorityState, CommandKind, \
+    CommandPhase, CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigApply, ConfigChange, \
+    DesiredRole, DynamicConfigPlan, FenceReason, Freshness, LocalPostgres, NodeSnapshot, ObservationContext, \
+    ObservationFailure, PendingRestart, PolicyMode, PostgresRole, PostgresState, QueryMode, RecoverySnapshot, \
+    ReplicationConnection, SafetyAction, SafetySnapshot, SlotCapabilities, SlotContext, SlotKind, SlotMember, \
+    SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, TimelineWal, Timing, \
+    WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 from .node import InProcessNodeControl, NodeControl
-from .protocol import Capability
+from .protocol import Capability, ProtocolError
 from .replication import NodeWatchdog
 from .rpc import AgentClient
 from .safety import SafetyState, ValidationError
@@ -18,6 +19,7 @@ from .safety import SafetyState, ValidationError
 __all__ = [
     'AckState',
     'AgentState',
+    'AgentTelemetry',
     'AgentCommands',
     'AgentClient',
     'AuthorityGrant',
@@ -40,10 +42,13 @@ __all__ = [
     'CheckpointMode',
     'CloneMode',
     'ConfigChange',
+    'ConfigApply',
     'DesiredRole',
     'DivergencePolicy',
+    'DynamicConfigPlan',
     'DriverResult',
     'Freshness',
+    'FenceReason',
     'FollowTarget',
     'InProcessNodeControl',
     'EventChannel',
@@ -60,6 +65,7 @@ __all__ = [
     'PolicyMode',
     'PostgresRole',
     'PostgresState',
+    'ProtocolError',
     'QueryMode',
     'ReloadMode',
     'RecoverySnapshot',

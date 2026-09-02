@@ -72,10 +72,42 @@ try:
 except ImportError:
     import types
 
-    from psycopg import DatabaseError, Error, OperationalError, ProgrammingError, sql
-    # isort: off
-    from psycopg import connect as __connect  # pyright: ignore [reportUnknownVariableType]
-    from psycopg.conninfo import conninfo_to_dict as _parse_conninfo
+    try:
+        from psycopg import DatabaseError, Error, OperationalError, ProgrammingError, sql
+        # isort: off
+        from psycopg import connect as __connect  # pyright: ignore [reportUnknownVariableType]
+        from psycopg.conninfo import conninfo_to_dict as _parse_conninfo
+    except ImportError:
+        class _MissingSql:
+
+            @staticmethod
+            def Identifier(value: object) -> object:
+                raise ImportError('PostgreSQL driver is not installed')
+
+            @staticmethod
+            def Literal(value: object) -> object:
+                raise ImportError('PostgreSQL driver is not installed')
+
+        missing_error = type('Error', (Exception,), {})
+        missing_database_error = type('DatabaseError', (missing_error,), {})
+        globals().update({
+            'Error': missing_error,
+            'DatabaseError': missing_database_error,
+            'OperationalError': type('OperationalError', (missing_database_error,), {}),
+            'ProgrammingError': type('ProgrammingError', (missing_database_error,), {}),
+            'sql': _MissingSql(),
+        })
+
+        def _missing_connect(*args: Any, **kwargs: Any) -> Any:
+            raise ImportError('PostgreSQL driver is not installed')
+
+        def _missing_parse(value: str, **kwargs: Any) -> None:
+            return None
+
+        globals()['__connect'] = _missing_connect
+        globals()['_parse_conninfo'] = _missing_parse
+        __connect = globals()['__connect']
+        sql = globals()['sql']
 
     def __get_parameter_status(self: 'Connection[Any]', param_name: str) -> Optional[str]:
         """Helper function to be injected into :class:`Connection` object.

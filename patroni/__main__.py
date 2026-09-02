@@ -21,6 +21,7 @@ from patroni.tags import Tags
 
 if TYPE_CHECKING:  # pragma: no cover
     from .config import Config
+    from .control import AuthorityKind, PolicyMode
     from .dcs import Cluster
     from .log import PatroniLogger
 
@@ -180,6 +181,12 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         :returns: a dictionary of tags set for this node.
         """
         return self._filter_tags(self.config.get('tags', {}))
+
+    def set_agent_policy(self, mode: 'PolicyMode') -> None:
+        """Apply split-agent policy; monolithic mode needs no transport."""
+
+    def grant_authority(self, kind: 'AuthorityKind') -> None:
+        """Forward split-agent authority; monolithic mode needs no grant."""
 
     def reload_config(self, sighup: bool = False, local: Optional[bool] = False) -> None:
         """Apply new configuration values for ``patroni`` daemon.

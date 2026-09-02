@@ -168,7 +168,9 @@ Agent configuration contains:
 - Agent socket server settings.
 
 The controller sends filtered, versioned dynamic PostgreSQL plans. The agent
-never returns credentials or raw configuration.
+never returns credentials or raw configuration. Plans may contain documented
+callback or replica-method strings already present in Patroni configuration;
+they cannot request an ad hoc command.
 
 Callbacks retain their documented action, role, and scope arguments. Custom
 replica methods retain documented arguments and configuration. They run in the

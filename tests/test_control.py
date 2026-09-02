@@ -151,6 +151,20 @@ class TestSafetyState(unittest.TestCase):
         self.grant(AuthorityKind.INITIALIZER)
         self.assertEqual(SafetyAction.RUN, self.state.submit(request).action)
 
+    def test_initializer_can_finish_primary_bootstrap(self) -> None:
+        self.grant(AuthorityKind.INITIALIZER)
+        self.state.observe(PostgresRole.PRIMARY)
+
+        for sequence, (kind, target) in enumerate((
+                (CommandKind.POST_BOOTSTRAP, DesiredRole.PRIMARY),
+                (CommandKind.SET_BOOTSTRAP, DesiredRole.UNCHANGED),
+                (CommandKind.CHECKPOINT, DesiredRole.UNCHANGED),
+        ), start=2):
+            with self.subTest(kind=kind):
+                request = self.command(kind, sequence=sequence, target=target)
+                self.assertEqual(SafetyAction.RUN, self.state.submit(request).action)
+                self.state.complete(request.command_id, CommandState.SUCCEEDED)
+
     def test_failsafe_preserves_but_does_not_create_primary(self) -> None:
         self.grant(AuthorityKind.FAILSAFE)
         request = self.command()
@@ -211,6 +225,28 @@ class TestSafetyState(unittest.TestCase):
         self.clock.advance(TTL)
 
         self.assertEqual(SafetyAction.NONE, self.state.tick())
+
+    def test_controller_rebind_retains_deadline_not_command_authority(self) -> None:
+        self.grant()
+        self.state.observe(PostgresRole.PRIMARY)
+        new_controller_id = str(uuid4())
+
+        self.state.rebind(new_controller_id, 1)
+
+        self.assertEqual(new_controller_id, self.state.snapshot.controller_boot_id)
+        self.assertEqual(AuthorityState.CURRENT, self.state.snapshot.authority_state)
+        request = CommandRequest(
+            str(uuid4()), new_controller_id, self.agent_id, 2,
+            CommandKind.PROMOTE, DesiredRole.PRIMARY, 1,
+        )
+        self.assertEqual(SafetyAction.REJECT, self.state.submit(request).action)
+
+        self.state.grant(AuthorityGrant(
+            AuthorityKind.LEADER, new_controller_id, self.agent_id, 1, 3,
+            self.clock(), self.clock() + WATCHDOG_TIMEOUT, self.timing,
+        ))
+        request = request._replace(command_id=str(uuid4()), sequence=4)
+        self.assertEqual(SafetyAction.RUN, self.state.submit(request).action)
 
     def test_explicit_fence_preempts_every_phase(self) -> None:
         for phase in CommandPhase:

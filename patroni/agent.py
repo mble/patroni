@@ -1,5 +1,6 @@
 """DCS-free PostgreSQL agent daemon."""
 import logging
+import os
 import time
 
 from threading import Event
@@ -11,6 +12,7 @@ from patroni.control import AgentCommands, BootstrapState, CheckpointMode, Clone
     CommandKind, CommandState, DesiredRole, DivergencePolicy, InProcessNodeControl, \
     LifecycleCommand, PolicyMode, ReloadMode, StopMode, SubmitState
 from patroni.control.authority import AuthorityMonitor
+from patroni.control.config import AgentConfigManager
 from patroni.control.postgres import LocalPostgresObserver
 from patroni.control.postgres_commands import PostgresCommandDriver
 from patroni.control.recovery import PostgresRecovery
@@ -38,6 +40,11 @@ DCS_SECTIONS = frozenset((
     'raft',
     'zookeeper',
 ))
+CONTROLLER_SECTIONS = frozenset((
+    'controller',
+    'ctl',
+    'restapi',
+))
 SHUTDOWN_POLL_SECONDS = 0.05
 
 
@@ -60,7 +67,8 @@ class PatroniAgent(AbstractPatroniDaemon):
     """Own PostgreSQL and host-local mechanics without a DCS client."""
 
     def __init__(self, config: 'Config', patroni_logger: 'PatroniLogger') -> None:
-        _reject_dcs(config)
+        local_config = getattr(config, 'local_configuration', config)
+        _reject_dcs(local_config)
         control_config = _control_config(config)
         super().__init__(config, patroni_logger)
 
@@ -72,6 +80,7 @@ class PatroniAgent(AbstractPatroniDaemon):
         global_config.update(None, config.dynamic_configuration)
         self.watchdog = Watchdog(config)
         self.postgresql = Postgresql(config['postgresql'], get_mpp(config))
+        self._config_manager = AgentConfigManager(config, self.postgresql)
         recovery = PostgresRecovery(self.postgresql, self._wake.set, config.get('bootstrap'))
         replication = PostgresReplication(
             self.postgresql,
@@ -88,7 +97,12 @@ class PatroniAgent(AbstractPatroniDaemon):
             replication,
         )
         self._rpc = AgentRpc(
-            self.node, self.agent_boot_id, time.monotonic, self.authority, self.set_policy,
+            self.node,
+            self.agent_boot_id,
+            time.monotonic,
+            self.authority,
+            self.set_policy,
+            self._config_manager.apply,
         )
         self._server = UnixServer(
             control_config.path,
@@ -113,6 +127,15 @@ class PatroniAgent(AbstractPatroniDaemon):
     def _run_cycle(self) -> None:
         self._wake.wait(1)
         self._wake.clear()
+        self._config_manager.save_cache()
+
+    def reload_config(self, sighup: bool = False, local: Optional[bool] = False) -> None:
+        try:
+            super().reload_config(sighup, local)
+            if local:
+                self._config_manager.reload_local()
+        except Exception:
+            logger.exception('Failed to reload agent configuration')
 
     def _shutdown(self) -> None:
         self._server.close()
@@ -169,6 +192,11 @@ def _reject_dcs(config: _ConfigView) -> None:
         raise PatroniFatalException(
             'agent configuration contains DCS section: {0}'.format(', '.join(configured)),
         )
+    controller_data = sorted(section for section in CONTROLLER_SECTIONS if config.get(section))
+    if controller_data:
+        raise PatroniFatalException(
+            'agent configuration contains controller section: {0}'.format(', '.join(controller_data)),
+        )
 
 
 def _control_config(config: _ConfigView) -> _ControlConfig:
@@ -184,7 +212,7 @@ def _control_config(config: _ConfigView) -> _ControlConfig:
     peer_uid = _peer_id(values.get('peer_uid'))
     peer_gid = _peer_id(values.get('peer_gid'))
 
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not os.path.isabs(path):
         raise PatroniFatalException('agent control socket is invalid')
     if not isinstance(timeout, (float, int)) or isinstance(timeout, bool) or timeout <= 0:
         raise PatroniFatalException('agent control timeout is invalid')

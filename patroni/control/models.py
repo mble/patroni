@@ -2,7 +2,7 @@
 import datetime
 
 from enum import Enum
-from typing import NamedTuple, Optional, Tuple
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 
 class AgentState(str, Enum):
@@ -93,6 +93,22 @@ class PolicyMode(str, Enum):
     PAUSED = 'paused'
 
 
+class ConfigApply(str, Enum):
+    """Versioned dynamic configuration result."""
+
+    APPLIED = 'applied'
+    REPLAYED = 'replayed'
+
+
+class FenceReason(str, Enum):
+    """Last local fence trigger."""
+
+    NONE = 'none'
+    AUTHORITY = 'authority'
+    COMMAND = 'command'
+    EXPLICIT = 'explicit'
+
+
 class PostgresRole(str, Enum):
     """PostgreSQL role relevant to primary safety."""
 
@@ -155,6 +171,7 @@ class ObservationFailure(str, Enum):
     NONE = 'none'
     QUERY_FAILED = 'query_failed'
     INCONSISTENT = 'inconsistent'
+    AGENT_UNAVAILABLE = 'agent_unavailable'
     LIMIT_EXCEEDED = 'limit_exceeded'
 
 
@@ -414,6 +431,25 @@ class AuthorityGrant(NamedTuple):
     issued_at: float
     deadline: float
     timing: Timing
+
+
+class DynamicConfigPlan(NamedTuple):
+    """Filtered DCS configuration for agent-local mechanics."""
+
+    revision: int
+    fingerprint: str
+    document: Dict[str, Any]
+
+
+class AgentTelemetry(NamedTuple):
+    """Bounded agent observability state."""
+
+    active_command: Optional[CommandKind]
+    active_phase: Optional[CommandPhase]
+    fence_count: int
+    fence_reason: FenceReason
+    config_revision: int
+    config_fingerprint: str
 
 
 class CommandRequest(NamedTuple):

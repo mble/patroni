@@ -1,4 +1,5 @@
 """Asynchronous, idempotent agent command execution."""
+import logging
 import math
 import re
 import time
@@ -11,6 +12,8 @@ from typing import cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
 from .models import CommandKind, CommandState, DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, SlotTags
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover
     from .journal import CommandJournal
@@ -550,6 +553,7 @@ class AgentCommands:
             _driver_result(driver_result)
             state = CommandState.SUCCEEDED if driver_result.value != CommandValue.FALSE else CommandState.FAILED
         except Exception:
+            logger.exception('Agent command %s failed', entry.result.request.kind.value)
             driver_result = DriverResult(CommandValue.NONE, None, None, ())
             state = CommandState.FAILED
 

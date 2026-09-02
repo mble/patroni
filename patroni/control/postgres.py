@@ -120,6 +120,12 @@ class LocalPostgresObserver(PostgresObserver):
     def slots(self) -> Dict[str, int]:
         return self._postgresql.slots()
 
+    def timeline_history(self, timeline: int) -> Sequence[Sequence[object]]:
+        return self._postgresql.get_history(timeline)
+
+    def checkpoint_locations(self) -> Tuple[Optional[int], Optional[int]]:
+        return self._postgresql.latest_checkpoint_locations()
+
     def _query(self, statement: str) -> List[Tuple[object, ...]]:
         """Prefer REST connection and retain heartbeat fallback semantics."""
         try:

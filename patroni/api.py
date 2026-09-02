@@ -20,7 +20,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ipaddress import ip_address, ip_network, IPv4Network, IPv6Network
 from socketserver import ThreadingMixIn
-from typing import Any, Callable, cast, Dict, Iterator, List, Optional, Tuple, TYPE_CHECKING, Union
+from typing import Any, Callable, cast, Dict, Iterator, List, Mapping, Optional, Tuple, TYPE_CHECKING, Union
 from urllib.parse import parse_qs, urlparse
 
 import dateutil.parser
@@ -37,6 +37,28 @@ from .utils import cluster_as_json, deep_compare, enable_keepalive, \
     parse_bool, parse_int, patch_config, split_host_port, tzutc, uri
 
 logger = logging.getLogger(__name__)
+
+AGENT_METRICS = (
+    ('connected', 'patroni_agent_connected', 'Value is 1 when the local agent is reachable.'),
+    ('snapshot_age', 'patroni_agent_snapshot_age_seconds', 'Age of the last agent snapshot.'),
+    ('authority_remaining', 'patroni_agent_authority_remaining_seconds', 'Remaining primary authority time.'),
+    ('protocol_major', 'patroni_agent_protocol_major', 'Negotiated agent protocol major version.'),
+    ('protocol_minor', 'patroni_agent_protocol_minor', 'Negotiated agent protocol minor version.'),
+)
+AGENT_DETAIL_METRICS = (
+    ('fence_count', 'patroni_agent_fence_total', 'Number of local fence attempts.'),
+    ('config_revision', 'patroni_agent_config_revision', 'Applied dynamic configuration revision.'),
+)
+
+
+def _metric_text(value: object) -> str:
+    text = str(value) if value else 'none'
+    return text.replace('\\', '\\\\').replace('\n', '\\n').replace('"', '\\"')
+
+
+def _metric_labels(labels: str, extra: Mapping[str, str]) -> str:
+    suffix = ''.join(',{0}="{1}"'.format(key, value) for key, value in extra.items())
+    return labels[:-1] + suffix + '}'
 
 
 def _postgres_role(role: ControlPostgresRole) -> Union[PostgresqlRole, str]:
@@ -843,6 +865,39 @@ class RestApiHandler(BaseHTTPRequestHandler):
                            " certificate expires.")
             metrics.append("# TYPE patroni_restapi_certificate_expiry gauge")
             metrics.append("patroni_restapi_certificate_expiry{0} {1}".format(labels, self.server.ssl_not_after))
+
+        read_agent_metrics = getattr(patroni, 'agent_metrics', None)
+        if callable(read_agent_metrics):
+            agent_metrics = cast(Mapping[str, object], read_agent_metrics())
+            for key, name, help_text in AGENT_METRICS:
+                metrics.append('# HELP {0} {1}'.format(name, help_text))
+                metrics.append('# TYPE {0} gauge'.format(name))
+                metrics.append('{0}{1} {2}'.format(name, labels, agent_metrics[key]))
+            for key, name, help_text in AGENT_DETAIL_METRICS:
+                metrics.append('# HELP {0} {1}'.format(name, help_text))
+                metrics.append('# TYPE {0} gauge'.format(name))
+                metrics.append('{0}{1} {2}'.format(name, labels, agent_metrics[key]))
+
+            command = _metric_text(agent_metrics['active_command'])
+            phase = _metric_text(agent_metrics['active_phase'])
+            command_labels = _metric_labels(labels, {'kind': command, 'phase': phase})
+            metrics.append('# HELP patroni_agent_command_active Value is 1 while an agent command is active.')
+            metrics.append('# TYPE patroni_agent_command_active gauge')
+            metrics.append('patroni_agent_command_active{0} {1}'.format(
+                command_labels, int(command != 'none'),
+            ))
+
+            reason = _metric_text(agent_metrics['fence_reason'])
+            reason_labels = _metric_labels(labels, {'reason': reason})
+            metrics.append('# HELP patroni_agent_last_fence Identifies the last local fence trigger.')
+            metrics.append('# TYPE patroni_agent_last_fence gauge')
+            metrics.append('patroni_agent_last_fence{0} 1'.format(reason_labels))
+
+            fingerprint = _metric_text(agent_metrics['config_fingerprint'])
+            config_labels = _metric_labels(labels, {'fingerprint': fingerprint})
+            metrics.append('# HELP patroni_agent_config_info Identifies the applied dynamic configuration.')
+            metrics.append('# TYPE patroni_agent_config_info gauge')
+            metrics.append('patroni_agent_config_info{0} 1'.format(config_labels))
 
         self.write_response(200, '\n'.join(metrics) + '\n', content_type='text/plain')
 

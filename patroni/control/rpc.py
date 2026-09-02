@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import socket
+import time
 
 from collections import OrderedDict
 from threading import Lock, RLock
@@ -10,9 +11,11 @@ from uuid import UUID, uuid4
 
 from .commands import CancelMode, CommandResult, CommandSubmission, \
     EventRecord, LifecycleCommand, RecoveryTarget, SubmitState
-from .models import AgentState, AuthorityGrant, CommandRequest, CommandState, ConfigChange, Freshness, NodeSnapshot, \
-    ObservationContext, PolicyMode, PostgresRole, RecoverySnapshot, SafetyAction, SlotCapabilities, SnapshotDetail, \
-    SyncContext, SyncSnapshot, TimelineWal, Timing, WatchdogReload, WatchdogSnapshot, WatchdogTiming
+from .models import AgentState, AgentTelemetry, AuthorityGrant, AuthorityKind, CommandRequest, \
+    CommandState, ConfigApply, ConfigChange, DynamicConfigPlan, FenceReason, Freshness, \
+    NodeSnapshot, ObservationContext, ObservationFailure, PolicyMode, PostgresRole, PostgresState, \
+    RecoverySnapshot, SafetyAction, SlotCapabilities, SnapshotDetail, SyncContext, SyncSnapshot, \
+    TimelineWal, Timing, WalObservation, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 from .node import NodeControl
 from .protocol import Capability, ErrorCode, Hello, NodeCall, Operation, pack, PROTOCOL_MAJOR, \
     PROTOCOL_MINOR, ProtocolError, read_frame, Request, Response, write_frame
@@ -38,6 +41,7 @@ ZERO_NODE_CALLS = frozenset((
     NodeCall.POSTMASTER_START,
     NodeCall.SERVER_VERSION,
     NodeCall.SLOTS,
+    NodeCall.CHECKPOINT_LOCATIONS,
     NodeCall.RECOVERY,
     NodeCall.CAN_REWIND,
     NodeCall.ARCHIVE_READY,
@@ -58,13 +62,15 @@ class AgentRpc:
     """Validate one controller session and dispatch NodeControl calls."""
 
     def __init__(self, node: NodeControl, agent_boot_id: str, clock: Callable[[], float],
-                 monitor: Any, policy_sink: Callable[[PolicyMode], None]) -> None:
+                 monitor: Any, policy_sink: Callable[[PolicyMode], None],
+                 config_sink: Optional[Callable[[DynamicConfigPlan], ConfigApply]] = None) -> None:
         _uuid(agent_boot_id, 'agent boot ID')
         self._node = node
         self._agent_boot_id = agent_boot_id
         self._clock = clock
         self._monitor = monitor
         self._policy_sink = policy_sink
+        self._config_sink = config_sink
         self._controller_boot_id: Optional[str] = None
         self._safety: Optional[SafetyState] = None
         self._last_sequence = 0
@@ -73,6 +79,10 @@ class AgentRpc:
         self._safety_lock = RLock()
         self._fence_lock = Lock()
         self._timing: Optional[Timing] = None
+        self._fence_count = 0
+        self._fence_reason = FenceReason.NONE
+        self._config_revision = 0
+        self._config_fingerprint = ''
 
     def handle(self, request: object) -> Response:
         """Return a redacted response for one request."""
@@ -103,7 +113,10 @@ class AgentRpc:
             if previous[0] != fingerprint:
                 raise ProtocolError(ErrorCode.CONFLICT, 'request ID conflict')
             return previous[1]
-        if request.sequence <= self._last_sequence:
+        is_rebind = request.operation == Operation.HELLO \
+            and self._controller_boot_id is not None \
+            and request.controller_boot_id != self._controller_boot_id
+        if request.sequence <= self._last_sequence and not is_rebind:
             raise ProtocolError(ErrorCode.STALE, 'request sequence is stale')
 
         if request.operation == Operation.HELLO:
@@ -124,8 +137,6 @@ class AgentRpc:
             raise ProtocolError(ErrorCode.BAD_REQUEST, 'hello contains agent identity')
         if request.body is not None:
             raise ProtocolError(ErrorCode.BAD_REQUEST, 'hello body is invalid')
-        if self._controller_boot_id is not None and request.controller_boot_id != self._controller_boot_id:
-            raise ProtocolError(ErrorCode.CONFLICT, 'controller identity changed')
         if self._controller_boot_id is None:
             self._controller_boot_id = request.controller_boot_id
             self._safety = SafetyState(
@@ -133,8 +144,19 @@ class AgentRpc:
             )
             self._monitor.bind(self._tick, self._fence)
             self._monitor.wake()
+        elif request.controller_boot_id != self._controller_boot_id:
+            with self._safety_lock:
+                self._safety_state().rebind(request.controller_boot_id, request.sequence)
+            self._controller_boot_id = request.controller_boot_id
+            self._history.clear()
+        snapshot = self._safety_state().snapshot
         return Hello(
-            self._agent_boot_id, PROTOCOL_MAJOR, PROTOCOL_MINOR, CAPABILITIES,
+            self._agent_boot_id,
+            PROTOCOL_MAJOR,
+            PROTOCOL_MINOR,
+            CAPABILITIES,
+            snapshot.authority_kind,
+            snapshot.authority_term,
         )
 
     def _identity(self, request: Request) -> None:
@@ -181,7 +203,12 @@ class AgentRpc:
             timeout, = _args(request.body, 1)
             with self._safety_lock:
                 self._safety_state().fence()
-            return self._fence(timeout)
+            return self._fence(timeout, FenceReason.EXPLICIT)
+        if request.operation == Operation.CONFIGURE:
+            return self._configure(request.body)
+        if request.operation == Operation.TELEMETRY:
+            _none(request.body)
+            return self._telemetry()
         raise ProtocolError(ErrorCode.BAD_REQUEST, 'operation is not supported')
 
     def _submit(self, request: Request) -> CommandSubmission:
@@ -200,7 +227,7 @@ class AgentRpc:
                 authority_term,
             ))
         if receipt.action == SafetyAction.FENCE:
-            self._fence()
+            self._fence(reason=FenceReason.COMMAND)
             return CommandSubmission(SubmitState.REJECTED, None)
         if receipt.action == SafetyAction.REJECT:
             return CommandSubmission(SubmitState.REJECTED, None)
@@ -215,7 +242,7 @@ class AgentRpc:
             if safety.snapshot.active_command_id == result.request.command_id:
                 action = safety.complete(result.request.command_id, result.state)
         if action == SafetyAction.FENCE:
-            self._fence()
+            self._fence(reason=FenceReason.COMMAND)
         self._observe()
         return result
 
@@ -236,8 +263,38 @@ class AgentRpc:
         self._policy_sink(request.body)
         self._monitor.wake()
         if action == SafetyAction.FENCE:
-            self._fence()
+            self._fence(reason=FenceReason.COMMAND)
         return action
+
+    def _configure(self, body: object) -> ConfigApply:
+        if not isinstance(body, DynamicConfigPlan) or self._config_sink is None:
+            raise ProtocolError(ErrorCode.BAD_REQUEST, 'dynamic configuration plan is invalid')
+        result = self._config_sink(body)
+        if not isinstance(cast(object, result), ConfigApply):
+            raise ProtocolError(ErrorCode.INTERNAL, 'dynamic configuration result is invalid')
+        self._config_revision = body.revision
+        self._config_fingerprint = body.fingerprint
+
+        return result
+
+    def _telemetry(self) -> AgentTelemetry:
+        active_kind = active_phase = None
+        with self._safety_lock:
+            safety = self._safety_state()
+            command_id = safety.snapshot.active_command_id
+            if command_id is not None:
+                status = safety.command(command_id)
+                active_kind = status.request.kind
+                active_phase = status.phase
+
+        return AgentTelemetry(
+            active_kind,
+            active_phase,
+            self._fence_count,
+            self._fence_reason,
+            self._config_revision,
+            self._config_fingerprint,
+        )
 
     def _call(self, body: object) -> object:
         raw_call, raw_args = _args(body, 2)
@@ -270,6 +327,10 @@ class AgentRpc:
             return self._node.server_version()
         if raw_call == NodeCall.SLOTS:
             return self._node.slots()
+        if raw_call == NodeCall.TIMELINE_HISTORY:
+            return self._node.timeline_history(cast(int, _one(args)))
+        if raw_call == NodeCall.CHECKPOINT_LOCATIONS:
+            return self._node.checkpoint_locations()
         if raw_call == NodeCall.RECOVERY:
             return self._node.recovery()
         if raw_call == NodeCall.CAN_REWIND:
@@ -327,8 +388,11 @@ class AgentRpc:
         if action == SafetyAction.FENCE:
             self._fence()
 
-    def _fence(self, timeout: Optional[float] = None) -> bool:
+    def _fence(self, timeout: Optional[float] = None,
+               reason: FenceReason = FenceReason.AUTHORITY) -> bool:
         with self._fence_lock:
+            self._fence_count += 1
+            self._fence_reason = reason
             with self._safety_lock:
                 timing = self._timing
             stop_timeout = timeout if timeout is not None \
@@ -369,13 +433,16 @@ class AgentClient(NodeControl):
         self._sequence = 0
         self._authority_term = 0
         self._closed = False
+        self._connected = False
+        self._last_success_at = 0.0
+        self._last_snapshot_at = 0.0
+        self._last_snapshot: Optional[NodeSnapshot] = None
+        self._last_telemetry = AgentTelemetry(None, None, 0, FenceReason.NONE, 0, '')
         self._lock = RLock()
         hello = self._rpc(Operation.HELLO, None)
         if not isinstance(hello, Hello):
             raise ProtocolError(ErrorCode.BAD_REQUEST, 'hello response is invalid')
-        _hello(hello)
-        self._agent_boot_id = hello.agent_boot_id
-        self._capabilities = hello.capabilities
+        self._install_hello(hello)
 
     @property
     def agent_boot_id(self) -> str:
@@ -383,19 +450,68 @@ class AgentClient(NodeControl):
         return self._agent_boot_id
 
     @property
+    def controller_boot_id(self) -> str:
+        """Return this controller process identity."""
+        return self._controller_boot_id
+
+    @property
     def capabilities(self) -> Tuple[Capability, ...]:
         """Return negotiated agent features."""
         return self._capabilities
 
+    @property
+    def authority_kind(self) -> Optional[AuthorityKind]:
+        """Return authority inherited from a prior controller session."""
+        return self._authority_kind
+
+    @property
+    def authority_term(self) -> int:
+        """Return the last agent-accepted authority term."""
+        return self._authority_term
+
+    @property
+    def connected(self) -> bool:
+        """Return whether the last RPC reached the agent."""
+        with self._lock:
+            return self._connected
+
+    @property
+    def protocol_version(self) -> Tuple[int, int]:
+        """Return the negotiated wire version."""
+        return self._protocol_version
+
+    @property
+    def last_success_at(self) -> float:
+        """Return the last successful RPC monotonic time."""
+        with self._lock:
+            return self._last_success_at
+
+    @property
+    def last_snapshot_at(self) -> float:
+        """Return the last successful snapshot monotonic time."""
+        with self._lock:
+            return self._last_snapshot_at
+
     def snapshot(self, detail: SnapshotDetail, freshness: Freshness,
                  context: ObservationContext) -> NodeSnapshot:
-        return cast(NodeSnapshot, self._rpc(Operation.SNAPSHOT, (detail, freshness, context)))
+        try:
+            snapshot = cast(NodeSnapshot, self._rpc(Operation.SNAPSHOT, (detail, freshness, context)))
+        except ProtocolError:
+            if detail != SnapshotDetail.STATUS:
+                raise
+            return self._unavailable_snapshot(detail)
+        with self._lock:
+            self._last_snapshot_at = time.monotonic()
+            self._last_snapshot = snapshot
+        return snapshot
 
     def invalidate(self) -> None:
         self._rpc(Operation.INVALIDATE, None)
 
     def close(self) -> None:
-        self._closed = True
+        with self._lock:
+            self._closed = True
+            self._connected = False
 
     def submit(self, command: LifecycleCommand) -> CommandSubmission:
         return cast(CommandSubmission, self._rpc(Operation.SUBMIT, (command, self._authority_term)))
@@ -456,6 +572,12 @@ class AgentClient(NodeControl):
 
     def slots(self) -> Dict[str, int]:
         return cast(Dict[str, int], self._call(NodeCall.SLOTS))
+
+    def timeline_history(self, timeline: int) -> Tuple[Tuple[object, ...], ...]:
+        return cast(Tuple[Tuple[object, ...], ...], self._call(NodeCall.TIMELINE_HISTORY, timeline))
+
+    def checkpoint_locations(self) -> Tuple[Optional[int], Optional[int]]:
+        return cast(Tuple[Optional[int], Optional[int]], self._call(NodeCall.CHECKPOINT_LOCATIONS))
 
     def recovery(self) -> RecoverySnapshot:
         return cast(RecoverySnapshot, self._call(NodeCall.RECOVERY))
@@ -519,7 +641,44 @@ class AgentClient(NodeControl):
 
     def grant(self, grant: AuthorityGrant) -> None:
         self._rpc(Operation.GRANT, grant)
+        self._authority_kind = grant.kind
         self._authority_term = grant.term
+
+    def configure(self, plan: DynamicConfigPlan) -> ConfigApply:
+        return cast(ConfigApply, self._rpc(Operation.CONFIGURE, plan))
+
+    def telemetry(self) -> AgentTelemetry:
+        try:
+            telemetry = cast(AgentTelemetry, self._rpc(Operation.TELEMETRY, None))
+        except ProtocolError:
+            return self._last_telemetry
+        with self._lock:
+            self._last_telemetry = telemetry
+        return telemetry
+
+    def _unavailable_snapshot(self, detail: SnapshotDetail) -> NodeSnapshot:
+        with self._lock:
+            previous = self._last_snapshot
+        return NodeSnapshot(
+            self._agent_boot_id,
+            previous.sequence if previous is not None else 0,
+            previous.collected_at if previous is not None else 0.0,
+            detail,
+            PostgresRole.UNKNOWN,
+            previous.desired_role if previous is not None else PostgresRole.UNKNOWN,
+            PostgresState.UNKNOWN,
+            previous.supports_multiple_sync if previous is not None else False,
+            previous.system_identifier if previous is not None else '',
+            0,
+            None,
+            WalObservation(None, None, None, None, None),
+            None,
+            None,
+            (),
+            None,
+            previous.pending_restart if previous is not None else (),
+            ObservationFailure.AGENT_UNAVAILABLE,
+        )
 
     def policy(self, mode: PolicyMode) -> SafetyAction:
         return cast(SafetyAction, self._rpc(Operation.POLICY, mode))
@@ -531,23 +690,54 @@ class AgentClient(NodeControl):
         with self._lock:
             if self._closed:
                 raise ProtocolError(ErrorCode.UNAVAILABLE, 'agent client is closed')
-            self._sequence += 1
-            if operation == Operation.GRANT:
-                if not isinstance(body, AuthorityGrant):
-                    raise ProtocolError(ErrorCode.BAD_REQUEST, 'authority grant is invalid')
-                body = body._replace(sequence=self._sequence)
-            request = Request(
-                str(uuid4()),
-                operation,
-                self._controller_boot_id,
-                self._agent_boot_id,
-                self._sequence,
-                body,
-            )
-            response = self._exchange(request)
+            response = self._send(operation, body)
+            if response.error == ErrorCode.FORBIDDEN and operation != Operation.HELLO:
+                self._reconnect()
+                if operation == Operation.SUBMIT:
+                    raise ProtocolError(ErrorCode.UNAVAILABLE, 'agent restarted before command submission')
+                response = self._send(operation, body)
         if response.error is not None:
             raise ProtocolError(response.error, 'agent request failed')
         return response.body
+
+    def _send(self, operation: Operation, body: object) -> Response:
+        self._sequence += 1
+        if operation == Operation.GRANT:
+            if not isinstance(body, AuthorityGrant):
+                raise ProtocolError(ErrorCode.BAD_REQUEST, 'authority grant is invalid')
+            body = body._replace(
+                controller_boot_id=self._controller_boot_id,
+                agent_boot_id=self._agent_boot_id,
+                sequence=self._sequence,
+            )
+        agent_boot_id = '' if operation == Operation.HELLO else self._agent_boot_id
+        request = Request(
+            str(uuid4()),
+            operation,
+            self._controller_boot_id,
+            agent_boot_id,
+            self._sequence,
+            body,
+        )
+        return self._exchange(request)
+
+    def _reconnect(self) -> None:
+        response = self._send(Operation.HELLO, None)
+        if response.error is not None or not isinstance(response.body, Hello):
+            raise ProtocolError(ErrorCode.UNAVAILABLE, 'agent handshake failed')
+        self._install_hello(response.body)
+
+    def _install_hello(self, hello: Hello) -> None:
+        _hello(hello)
+        if self._agent_boot_id and hello.agent_boot_id != self._agent_boot_id:
+            self._last_snapshot_at = 0.0
+            self._last_snapshot = None
+            self._last_telemetry = AgentTelemetry(None, None, 0, FenceReason.NONE, 0, '')
+        self._agent_boot_id = hello.agent_boot_id
+        self._capabilities = hello.capabilities
+        self._protocol_version = hello.protocol_major, hello.protocol_minor
+        self._authority_kind = hello.authority_kind
+        self._authority_term = hello.authority_term
 
     def _exchange(self, request: Request) -> Response:
         last_error: Optional[Exception] = None
@@ -561,9 +751,12 @@ class AgentClient(NodeControl):
                     response = read_frame(stream)
                 if not isinstance(response, Response) or response.request_id != request.request_id:
                     raise ProtocolError(ErrorCode.BAD_REQUEST, 'response envelope is invalid')
+                self._connected = True
+                self._last_success_at = time.monotonic()
                 return response
             except (OSError, ProtocolError) as exc:
                 last_error = exc
+        self._connected = False
         raise ProtocolError(ErrorCode.UNAVAILABLE, 'agent is unavailable') from last_error
 
 
@@ -609,6 +802,14 @@ def _hello(value: Hello) -> None:
         raise ProtocolError(ErrorCode.VERSION, 'protocol capabilities are invalid')
     if any(not isinstance(cast(object, capability), Capability) for capability in value.capabilities):
         raise ProtocolError(ErrorCode.VERSION, 'protocol capabilities are invalid')
+    if value.authority_kind is not None \
+            and not isinstance(cast(object, value.authority_kind), AuthorityKind):
+        raise ProtocolError(ErrorCode.VERSION, 'authority kind is invalid')
+    if not isinstance(cast(object, value.authority_term), int) or isinstance(value.authority_term, bool) \
+            or value.authority_term < 0:
+        raise ProtocolError(ErrorCode.VERSION, 'authority term is invalid')
+    if (value.authority_kind is None) != (value.authority_term == 0):
+        raise ProtocolError(ErrorCode.VERSION, 'authority state is invalid')
 
 
 def _request_id(request: object) -> str:

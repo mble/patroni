@@ -485,6 +485,30 @@ class TestRestApiHandler(unittest.TestCase):
                               {'listen': '127.0.0.1:8008', 'auth': 'test:test'})
             self.assertNotIn('patroni_restapi_certificate_expiry', response_mock.call_args[0][1])
 
+    def test_do_GET_metrics_includes_agent_state(self):
+        agent_metrics = {
+            'connected': 1.0,
+            'snapshot_age': 2.0,
+            'authority_remaining': 3.0,
+            'protocol_major': 1.0,
+            'protocol_minor': 0.0,
+            'active_command': 'promote',
+            'active_phase': 'mutating',
+            'fence_count': 4.0,
+            'fence_reason': 'authority',
+            'config_revision': 5.0,
+            'config_fingerprint': 'abc',
+        }
+        with patch.object(MockPatroni, 'agent_metrics', return_value=agent_metrics, create=True), \
+                patch.object(RestApiHandler, 'write_response') as response_mock:
+            MockRestApiServer(RestApiHandler, 'GET /metrics')
+
+        body = response_mock.call_args.args[1]
+        self.assertIn('patroni_agent_command_active{scope="dummy",name="test",kind="promote",phase="mutating"} 1',
+                      body)
+        self.assertIn('patroni_agent_fence_total{scope="dummy",name="test"} 4.0', body)
+        self.assertIn('patroni_agent_last_fence{scope="dummy",name="test",reason="authority"} 1', body)
+
     @patch.object(MockPatroni, 'dcs')
     def test_do_PATCH_config(self, mock_dcs):
         config = {'postgresql': {'use_slots': False, 'use_pg_rewind': True, 'parameters': {'wal_level': 'logical'}}}

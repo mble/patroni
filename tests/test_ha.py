@@ -11,8 +11,8 @@ import etcd
 from patroni import global_config
 from patroni.collections import CaseInsensitiveSet
 from patroni.config import Config
-from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, CommandKind, \
-    CommandResult, CommandState, CommandSubmission, CommandValue, DesiredRole, DivergencePolicy, \
+from patroni.control import AgentCommands, AuthorityKind, BootstrapState, CheckpointMode, CloneMode, \
+    CommandKind, CommandResult, CommandState, CommandSubmission, CommandValue, DesiredRole, DivergencePolicy, \
     EventKind, EventRecord, InProcessNodeControl, LifecycleCommand, ReloadMode, StopMode, SubmitState
 from patroni.control.postgres import LocalPostgresObserver
 from patroni.control.postgres_commands import PostgresCommandDriver
@@ -22,7 +22,7 @@ from patroni.dcs import Cluster, ClusterConfig, Failover, get_dcs, \
     Leader, Member, RemoteMember, Status, SyncState, TimelineHistory
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
 from patroni.exceptions import DCSError, PatroniFatalException, PostgresConnectionException
-from patroni.ha import _MemberStatus, Ha
+from patroni.ha import _MemberStatus, Ha, InitializeMode
 from patroni.postgresql import Postgresql
 from patroni.postgresql.bootstrap import Bootstrap
 from patroni.postgresql.callback_executor import CallbackAction
@@ -299,6 +299,30 @@ class TestHa(PostgresInit):
         self.ha.dcs.update_leader = Mock(side_effect=[DCSError(''), Exception])
         self.assertRaises(DCSError, self.ha.update_lock)
         self.assertFalse(self.ha.update_lock(True))
+
+    def test_authority_requires_successful_dcs_write(self):
+        grant = self.ha.patroni.grant_authority = Mock()
+        self.ha.dcs.acquire_leader_lock = Mock(side_effect=(True, False))
+
+        self.assertTrue(self.ha.acquire_lock())
+        self.assertFalse(self.ha.acquire_lock())
+        grant.assert_called_once_with(AuthorityKind.LEADER)
+
+        grant.reset_mock()
+        self.ha.dcs.initialize = Mock(side_effect=(True, False))
+        self.assertTrue(self.ha._initialize(InitializeMode.CREATE, SYSID))
+        self.assertFalse(self.ha._initialize(InitializeMode.CREATE, SYSID))
+        grant.assert_called_once_with(AuthorityKind.INITIALIZER)
+
+    def test_initializer_authority_renews_during_bootstrap(self):
+        grant = self.ha.patroni.grant_authority = Mock()
+        self.ha.cluster = get_cluster_bootstrapping_without_leader()
+        self.ha.node = Mock()
+        self.ha.node.recovery.return_value = Mock(bootstrapping=True)
+
+        self.ha._renew_initializer()
+
+        grant.assert_called_once_with(AuthorityKind.INITIALIZER)
 
     @patch.object(Postgresql, 'received_timeline', Mock(return_value=None))
     def test_touch_member(self):

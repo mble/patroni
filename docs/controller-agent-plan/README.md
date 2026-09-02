@@ -63,7 +63,7 @@ etcd v2, and qualification of other DCS implementations.
 | [M05](milestones/05-replication-watchdog.md) | Complete: replication and watchdog |
 | [M06](milestones/06-process-ownership.md) | Complete: process supervision and adoption |
 | [M07](milestones/07-unix-transport.md) | Complete: Unix transport |
-| [M08](milestones/08-controller.md) | Controller mode and REST parity |
+| [M08](milestones/08-controller.md) | Complete: controller mode and REST parity |
 | [M09](milestones/09-kubernetes.md) | Kubernetes and fault qualification |
 | [M10](milestones/10-rollout.md) | Parity, rollout, and rollback |
 

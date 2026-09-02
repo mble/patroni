@@ -96,6 +96,14 @@ class PostgresObserver(ABC):
     def slots(self) -> Dict[str, int]:
         """Read current replication-slot positions."""
 
+    @abstractmethod
+    def timeline_history(self, timeline: int) -> Sequence[Sequence[object]]:
+        """Read timeline history through PostgreSQL's local files."""
+
+    @abstractmethod
+    def checkpoint_locations(self) -> Tuple[Optional[int], Optional[int]]:
+        """Read shutdown checkpoint locations."""
+
 
 class NodeControl(ABC):
     """Expose bounded local observations to controller code."""
@@ -189,6 +197,14 @@ class NodeControl(ABC):
     @abstractmethod
     def slots(self) -> Dict[str, int]:
         """Return current replication-slot positions."""
+
+    @abstractmethod
+    def timeline_history(self, timeline: int) -> Tuple[Tuple[object, ...], ...]:
+        """Return bounded timeline history."""
+
+    @abstractmethod
+    def checkpoint_locations(self) -> Tuple[Optional[int], Optional[int]]:
+        """Return checkpoint and previous WAL locations."""
 
     @abstractmethod
     def recovery(self) -> RecoverySnapshot:
@@ -393,6 +409,17 @@ class InProcessNodeControl(NodeControl):
     def slots(self) -> Dict[str, int]:
         with self._lock:
             return self._observer.slots()
+
+    def timeline_history(self, timeline: int) -> Tuple[Tuple[object, ...], ...]:
+        raw_timeline = cast(object, timeline)
+        if not isinstance(raw_timeline, int) or isinstance(raw_timeline, bool) or raw_timeline < 1:
+            raise ValueError('invalid timeline')
+        with self._lock:
+            return tuple(tuple(line) for line in self._observer.timeline_history(timeline))
+
+    def checkpoint_locations(self) -> Tuple[Optional[int], Optional[int]]:
+        with self._lock:
+            return self._observer.checkpoint_locations()
 
     def recovery(self) -> RecoverySnapshot:
         return self._recovery_service().snapshot()

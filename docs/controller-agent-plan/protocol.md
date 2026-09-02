@@ -45,10 +45,14 @@ Every command additionally contains its command ID and required authority.
 - `CANCEL`
 - `CALL`
 - `FENCE`
+- `CONFIGURE`
+- `TELEMETRY`
 
 `HELLO` returns the agent boot ID, protocol version, and negotiated
-capabilities. The initial capabilities cover `NodeControl`, authority fencing,
-event acknowledgement, and event long-poll.
+capabilities. It also returns any unexpired authority kind and term so a
+restarted controller can renew the same evidence without extending its
+deadline. Protocol 1.1 capabilities cover `NodeControl`, authority fencing,
+event acknowledgement, event long-poll, filtered configuration, and telemetry.
 
 An explicit `FENCE` request is always admissible and preempts active work.
 Automatic authority-expiry fencing is disabled under paused policy, matching
@@ -57,6 +61,16 @@ current Patroni.
 `POLICY` carries Patroni's active or paused state. `EVENTS` is a bounded
 long-poll used for shutdown safepoints. Events have
 monotonic sequence numbers and explicit acknowledgement.
+
+`CONFIGURE` carries an ordered revision, SHA-256 fingerprint, and only
+agent-relevant documented DCS keys. Depth, item count, strings, integers, and
+revision order are bounded. Replays are idempotent; conflicting or stale
+revisions fail closed. The payload is not local configuration and contains no
+DCS or controller credentials.
+
+`TELEMETRY` reports connection state, snapshot age, authority time, negotiated
+version, active command and phase, fencing, and applied configuration identity.
+It contains no credentials or command output.
 
 Agent configuration requires an absolute socket path:
 

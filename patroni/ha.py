@@ -7,6 +7,7 @@ import sys
 import time
 import uuid
 
+from enum import Enum
 from threading import RLock
 from typing import Any, Callable, cast, Collection, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING, Union
 
@@ -14,12 +15,13 @@ from . import global_config, psycopg, thread_pool
 from .__main__ import Patroni
 from .async_executor import AsyncExecutor, CriticalTask
 from .collections import CaseInsensitiveSet
-from .control import BootstrapState, CallbackKind, CancelMode, CheckpointMode, CloneMode, CommandKind, CommandResult, \
-    CommandState, CommandValue, DesiredRole, DivergencePolicy, EventKind, EventRecord, FollowTarget, Freshness, \
-    LifecycleCommand, NodeSnapshot, NodeWatchdog, ObservationContext, PostgresRole as ControlPostgresRole, \
-    PostgresState as ControlPostgresState, RecoveryTarget, ReloadMode, SlotAction, SlotCapabilities, SlotContext, \
-    SlotKind, SlotMember, SlotMode, SlotPlan, SlotSpec, SlotTags, SnapshotDetail, StopMode, SubmitState, SyncAction, \
-    SyncContext, SyncCount, SyncMember, SyncPlan, TargetKind
+from .control import AuthorityKind, BootstrapState, CallbackKind, CancelMode, CheckpointMode, CloneMode, \
+    CommandKind, CommandResult, CommandState, CommandValue, DesiredRole, DivergencePolicy, EventKind, \
+    EventRecord, FollowTarget, Freshness, LifecycleCommand, NodeSnapshot, NodeWatchdog, ObservationContext, \
+    PolicyMode, PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, ProtocolError, \
+    RecoveryTarget, ReloadMode, SlotAction, SlotCapabilities, SlotContext, SlotKind, SlotMember, SlotMode, \
+    SlotPlan, SlotSpec, SlotTags, SnapshotDetail, StopMode, SubmitState, SyncAction, SyncContext, \
+    SyncCount, SyncMember, SyncPlan, TargetKind
 from .dcs import AbstractDCS, Cluster, Leader, Member, RemoteMember, Status, SyncState
 from .exceptions import DCSError, PatroniFatalException, PostgresConnectionException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
@@ -30,6 +32,13 @@ from .utils import parse_int, polling_loop, tzutc
 logger = logging.getLogger(__name__)
 
 COMMAND_WAIT_SECONDS = 0.05
+
+
+class InitializeMode(str, Enum):
+    """DCS initialize-key operation."""
+
+    CREATE = 'create'
+    UPDATE = 'update'
 
 
 class _SyncView(NamedTuple):
@@ -677,7 +686,32 @@ class Ha(object):
             logger.exception('Unexpected exception raised from acquire_leader_lock, please report it as a BUG')
             ret = False
         self.set_is_leader(ret)
+        if ret:
+            self._grant(AuthorityKind.LEADER)
         return ret
+
+    def _grant(self, kind: AuthorityKind) -> None:
+        grant = getattr(self.patroni, 'grant_authority', None)
+        if grant is not None:
+            grant(kind)
+
+    def _set_policy(self, mode: PolicyMode) -> None:
+        apply_policy = getattr(self.patroni, 'set_agent_policy', None)
+        if apply_policy is not None:
+            apply_policy(mode)
+
+    def _initialize(self, mode: InitializeMode, sysid: str = '') -> bool:
+        initialized = self.dcs.initialize(create_new=mode == InitializeMode.CREATE, sysid=sysid)
+        if initialized:
+            self._grant(AuthorityKind.INITIALIZER)
+
+        return initialized
+
+    def _renew_initializer(self) -> None:
+        if self.cluster.initialize != '':
+            return
+        if self.node.recovery().bootstrapping:
+            self._grant(AuthorityKind.INITIALIZER)
 
     def _failsafe_config(self) -> Optional[Dict[str, str]]:
         if self.is_failsafe_mode():
@@ -723,6 +757,7 @@ class Ha(object):
             ret = False
         self.set_is_leader(ret)
         if ret:
+            self._grant(AuthorityKind.LEADER)
             self.watchdog.keepalive()
         return ret
 
@@ -876,7 +911,7 @@ class Ha(object):
         # no initialize key and node is allowed to be primary and has 'bootstrap' section in a configuration file
         if self.cluster.is_unlocked() and self.cluster.initialize is None\
                 and not self.patroni.nofailover and 'bootstrap' in self.patroni.config:
-            if self.dcs.initialize(create_new=True):  # race for initialization
+            if self._initialize(InitializeMode.CREATE):  # race for initialization
                 with self._async_response:
                     self._async_response.reset()
 
@@ -2657,9 +2692,11 @@ class Ha(object):
             self.cancel_initialization()
 
         self._ensure_checkpoint()
-        self.dcs.initialize(create_new=(self.cluster.initialize is None), sysid=self._node_state().system_identifier)
+        initialize_mode = InitializeMode.CREATE if self.cluster.initialize is None else InitializeMode.UPDATE
+        self._initialize(initialize_mode, self._node_state().system_identifier)
         self.dcs.set_config_value(json.dumps(self.patroni.config.dynamic_configuration, separators=(',', ':')))
-        self.dcs.take_leader()
+        if self.dcs.take_leader():
+            self._grant(AuthorityKind.LEADER)
         self.set_is_leader(True)
         if self.is_synchronous_mode():
             self._set_sync((), SyncCount.EXPLICIT, global_config.min_synchronous_nodes)
@@ -2721,7 +2758,10 @@ class Ha(object):
             try:
                 self.load_cluster_from_dcs()
                 global_config.update(self.cluster)
+                policy = PolicyMode.PAUSED if self.is_paused() else PolicyMode.ACTIVE
+                self._set_policy(policy)
                 self.state_handler.reset_cluster_info_state(self.cluster, self.patroni)
+                self._renew_initializer()
             except Exception as exc1:
                 self.state_handler.reset_cluster_info_state(None)
                 if self.is_failsafe_mode():
@@ -2749,10 +2789,9 @@ class Ha(object):
 
             # cluster has leader key but not initialize key
             if self.has_lock(False) and not self.sysid_valid(self.cluster.initialize):
-                self.dcs.initialize(
-                    create_new=(self.cluster.initialize is None),
-                    sysid=self._node_state().system_identifier,
-                )
+                initialize_mode = InitializeMode.CREATE \
+                    if self.cluster.initialize is None else InitializeMode.UPDATE
+                self._initialize(initialize_mode, self._node_state().system_identifier)
 
             if self.has_lock(False) and not (self.cluster.config and self.cluster.config.data):
                 self.dcs.set_config_value(json.dumps(self.patroni.config.dynamic_configuration, separators=(',', ':')))
@@ -2843,7 +2882,9 @@ class Ha(object):
                         logger.error('No initialize key in DCS and PostgreSQL is running as replica, aborting start')
                         logger.error('Please first start Patroni on the node running as primary')
                         sys.exit(1)
-                    self.dcs.initialize(create_new=(self.cluster.initialize is None), sysid=data_sysid)
+                    initialize_mode = InitializeMode.CREATE \
+                        if self.cluster.initialize is None else InitializeMode.UPDATE
+                    self._initialize(initialize_mode, data_sysid)
 
             if not self.state_handler.is_healthy():
                 if self.is_paused():
@@ -2897,6 +2938,10 @@ class Ha(object):
             dcs_failed = True
             logger.error('Error communicating with DCS')
             return self._handle_dcs_error()
+        except ProtocolError:
+            dcs_failed = True
+            logger.error('Error communicating with PostgreSQL agent')
+            return 'PostgreSQL agent is not accessible'
         except (psycopg.Error, PostgresConnectionException):
             return 'Error communicating with PostgreSQL. Will try again later'
         finally:
@@ -2911,6 +2956,7 @@ class Ha(object):
                 if self.is_failsafe_mode() and self.check_failsafe_topology():
                     self.set_is_leader(True)
                     self._failsafe.set_is_active(time.time())
+                    self._grant(AuthorityKind.FAILSAFE)
                     self.watchdog.keepalive()
                     self._sync_replication_slots(True)
                     return 'continue to run as a leader because failsafe mode is enabled and all members are accessible'

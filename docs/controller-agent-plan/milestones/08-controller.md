@@ -1,5 +1,7 @@
 # M08: Controller mode and REST parity
 
+Status: complete.
+
 ## Goal
 
 Run HA policy and public APIs without local PostgreSQL access.
@@ -59,3 +61,20 @@ current PostgreSQL query freshness.
 ## Exit
 
 A local two-process node reaches HA, API, and lifecycle parity with etcd3.
+
+## Result
+
+`patroni-controller` runs DCS, HA, REST, and peer policy against a DCS-free
+`patroni-agent`. Controller configuration is limited to `etcd3`; agent
+configuration rejects DCS and public API sections. Dynamic DCS configuration is
+filtered into bounded, ordered plans before crossing the socket.
+
+Authority follows successful leader, initializer, and failsafe decisions. A
+restarted controller adopts the agent's unexpired evidence without extending
+it. Lost agent observations stop member and leader renewal. REST adds namespaced
+agent metrics while preserving existing fields and status paths.
+
+Unit coverage exercises configuration ownership, dynamic plan validation,
+authority renewal and expiry, restarts, disconnects, REST status, and metrics.
+The Linux smoke harness bootstraps PostgreSQL through the split processes and
+etcd3, then verifies primary SQL and agent telemetry.

@@ -58,6 +58,7 @@ CLASSIFIERS = [
 CONSOLE_SCRIPTS = ['patroni = patroni.__main__:main',
                    'patroni-agent = patroni.agent:main',
                    'patroni-agent-supervisor = patroni.agent_supervisor:main',
+                   'patroni-controller = patroni.controller:main',
                    'patronictl = patroni.ctl:ctl',
                    'patroni_raft_controller = patroni.raft_controller:main',
                    "patroni_wale_restore = patroni.scripts.wale_restore:main",

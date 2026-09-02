@@ -14,6 +14,11 @@
 The controller sends desired state. The agent returns observations and typed
 command results. Neither reaches through the other layer.
 
+Dynamic configuration remains controller-owned as DCS state. Only documented,
+agent-relevant values cross as a bounded, versioned plan. Existing configured
+callback and replica-method command strings may therefore cross inside their
+documented configuration fields; the protocol cannot submit ad hoc shell text.
+
 ## Semantic parity
 
 Existing Patroni is the behavioural specification. Split mode must preserve:

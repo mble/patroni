@@ -4,8 +4,9 @@ from threading import Event, Thread
 from unittest.mock import Mock
 from uuid import uuid4
 
-from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, CloneMode, \
-    CommandKind, CommandState, DesiredRole, DivergencePolicy, PolicyMode, PostgresRole, SafetyAction, Timing
+from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, \
+    CloneMode, CommandKind, CommandState, ConfigApply, DesiredRole, DivergencePolicy, \
+    DynamicConfigPlan, FenceReason, PolicyMode, PostgresRole, SafetyAction, Timing
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.commands import CommandResult, CommandSubmission, \
     CommandValue, LifecycleCommand, ReloadMode, StopMode, SubmitState
@@ -165,6 +166,37 @@ class TestAgentRpc(unittest.TestCase):
         release.set()
         worker.join(1)
         monitor.close()
+
+    def test_configuration_and_telemetry_are_typed(self) -> None:
+        config = Mock()
+        config.return_value = ConfigApply.APPLIED
+        rpc = AgentRpc(self.node, self.agent_id, self.clock, self.monitor, Mock(), config)
+        self.assertIsNone(rpc.handle(self.request(Operation.HELLO, None, 1, agent_id='')).error)
+        plan = DynamicConfigPlan(3, 'a' * 64, {'postgresql': {'use_slots': False}})
+
+        response = rpc.handle(self.request(Operation.CONFIGURE, plan, 2))
+        telemetry = rpc.handle(self.request(Operation.TELEMETRY, None, 3)).body
+
+        self.assertIsNone(response.error)
+        config.assert_called_once_with(plan)
+        self.assertEqual(3, telemetry.config_revision)
+        self.assertEqual(FenceReason.NONE, telemetry.fence_reason)
+
+    def test_controller_session_rebinds_with_prior_authority(self) -> None:
+        timing = Timing(30.0, 10.0, 10.0, 20.0)
+        grant = AuthorityGrant(
+            AuthorityKind.LEADER, self.controller_id, self.agent_id, 4, 2,
+            self.clock(), self.clock() + 1, timing,
+        )
+        self.assertIsNone(self.rpc.handle(self.request(Operation.GRANT, grant, 2)).error)
+        new_controller_id = str(uuid4())
+        request = Request(str(uuid4()), Operation.HELLO, new_controller_id, '', 1, None)
+
+        response = self.rpc.handle(request)
+
+        self.assertIsNone(response.error)
+        self.assertEqual(AuthorityKind.LEADER, response.body.authority_kind)
+        self.assertEqual(4, response.body.authority_term)
 
 
 if __name__ == '__main__':

@@ -14,16 +14,17 @@ from .commands import AckState, BootstrapState, CallbackKind, CancelMode, Checkp
     CloneMode, CommandResult, CommandSubmission, CommandValue, DivergencePolicy, EventKind, \
     EventRecord, FollowTarget, LifecycleCommand, RecoveryTarget, ReloadMode, SlotAction, \
     SlotMode, SlotPlan, StopMode, SubmitState, SyncAction, SyncCount, SyncPlan, TargetKind
-from .models import AgentState, AuthorityGrant, AuthorityKind, AuthorityState, CommandKind, CommandPhase, \
-    CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigChange, DesiredRole, Freshness, LocalPostgres, \
-    NodeSnapshot, ObservationContext, ObservationFailure, PendingRestart, PolicyMode, PostgresRole, PostgresState, \
-    QueryMode, RecoverySnapshot, ReplicationConnection, SafetyAction, SafetySnapshot, SlotCapabilities, SlotContext, \
-    SlotKind, SlotMember, SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, \
-    TimelineWal, Timing, WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
+from .models import AgentState, AgentTelemetry, AuthorityGrant, AuthorityKind, AuthorityState, CommandKind, \
+    CommandPhase, CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigApply, ConfigChange, \
+    DesiredRole, DynamicConfigPlan, FenceReason, Freshness, LocalPostgres, NodeSnapshot, ObservationContext, \
+    ObservationFailure, PendingRestart, PolicyMode, PostgresRole, PostgresState, QueryMode, RecoverySnapshot, \
+    ReplicationConnection, SafetyAction, SafetySnapshot, SlotCapabilities, SlotContext, SlotKind, SlotMember, \
+    SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, TimelineWal, Timing, \
+    WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 
 MAGIC = b'PAC1'
 PROTOCOL_MAJOR = 1
-PROTOCOL_MINOR = 0
+PROTOCOL_MINOR = 1
 HEADER = struct.Struct('!4sHHI')
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
@@ -50,6 +51,8 @@ class Operation(str, Enum):
     GRANT = 'grant'
     POLICY = 'policy'
     FENCE = 'fence'
+    CONFIGURE = 'configure'
+    TELEMETRY = 'telemetry'
 
 
 class NodeCall(str, Enum):
@@ -67,6 +70,8 @@ class NodeCall(str, Enum):
     POSTMASTER_START = 'postmaster_start'
     SERVER_VERSION = 'server_version'
     SLOTS = 'slots'
+    TIMELINE_HISTORY = 'timeline_history'
+    CHECKPOINT_LOCATIONS = 'checkpoint_locations'
     RECOVERY = 'recovery'
     CAN_REWIND = 'can_rewind'
     REWIND_NEEDED = 'rewind_needed'
@@ -95,6 +100,8 @@ class Capability(str, Enum):
     AUTHORITY_FENCING = 'authority_fencing'
     EVENT_ACK = 'event_ack'
     EVENT_LONG_POLL = 'event_long_poll'
+    DYNAMIC_CONFIG = 'dynamic_config'
+    TELEMETRY = 'telemetry'
 
 
 class ErrorCode(str, Enum):
@@ -143,19 +150,22 @@ class Hello(NamedTuple):
     protocol_major: int
     protocol_minor: int
     capabilities: Tuple[Capability, ...]
+    authority_kind: Optional[AuthorityKind]
+    authority_term: int
 
 
 ENUM_TYPES: Tuple[Type[Enum], ...] = (
     AckState, AgentState, AuthorityKind, AuthorityState, BootstrapState, CallbackKind, CancelMode, Capability,
     CheckpointMode, CloneMode, CommandKind, CommandPhase, CommandState, CommandValue, DesiredRole, DivergencePolicy,
-    ErrorCode, EventKind, Freshness, NodeCall, ObservationFailure, Operation, PolicyMode, PostgresRole, PostgresState,
+    ConfigApply, ErrorCode, EventKind, FenceReason, Freshness, NodeCall, ObservationFailure, Operation, PolicyMode,
+    PostgresRole, PostgresState,
     QueryMode, ReloadMode, SafetyAction, SlotAction, SlotKind, SlotMode, SnapshotDetail, StopMode, SubmitState,
     SyncAction, SyncCount, SyncType, TargetKind, WatchdogMode, WatchdogReload,
 )
 RECORD_TYPES: Tuple[Type[Any], ...] = (
-    AuthorityGrant, CommandReceipt, CommandRequest, CommandResult, CommandStatus, CommandSubmission, ConfigChange,
-    EventRecord, FollowTarget, Hello, LifecycleCommand, LocalPostgres, NodeSnapshot, ObservationContext, PendingRestart,
-    RecoveryTarget,
+    AgentTelemetry, AuthorityGrant, CommandReceipt, CommandRequest, CommandResult, CommandStatus, CommandSubmission,
+    ConfigChange, DynamicConfigPlan, EventRecord, FollowTarget, Hello, LifecycleCommand, LocalPostgres, NodeSnapshot,
+    ObservationContext, PendingRestart, RecoveryTarget,
     RecoverySnapshot, ReplicationConnection, Request, Response, SafetySnapshot, SlotCapabilities, SlotContext,
     SlotMember, SlotPlan, SlotSpec, SlotTags, SyncContext, SyncMember, SyncPlan, SyncSnapshot, TimelineWal, Timing,
     WalObservation, WatchdogSnapshot, WatchdogTiming,

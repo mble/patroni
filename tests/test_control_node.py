@@ -90,6 +90,12 @@ class FakeObserver(PostgresObserver):
     def slots(self):
         return {}
 
+    def timeline_history(self, timeline):
+        return ((timeline - 1, '0/10', 'reason'),)
+
+    def checkpoint_locations(self):
+        return 20, 10
+
 
 def local(state=PostgresState.RUNNING, role=PostgresRole.PRIMARY,
           pending_restart=()):
@@ -216,6 +222,10 @@ class TestInProcessNodeControl(unittest.TestCase):
 
         self.assertEqual(PostgresRole.PRIMARY, snapshot.observed_role)
         self.assertEqual([], self.observer.query_modes)
+
+    def test_history_and_checkpoint_reads(self) -> None:
+        self.assertEqual(((1, '0/10', 'reason'),), self.node.timeline_history(2))
+        self.assertEqual((20, 10), self.node.checkpoint_locations())
 
     def test_concurrent_change_fails_closed(self) -> None:
         self.observer.reads = [

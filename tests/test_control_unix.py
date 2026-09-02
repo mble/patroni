@@ -9,10 +9,12 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, \
-    CloneMode, CommandKind, CommandState, DesiredRole, DivergencePolicy, PostgresRole, Timing
+    CloneMode, CommandKind, CommandState, ConfigApply, DesiredRole, DivergencePolicy, \
+    Freshness, ObservationContext, ObservationFailure, PostgresRole, SnapshotDetail, Timing
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.commands import CommandResult, CommandSubmission, CommandValue, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
+from patroni.control.config import config_plan
 from patroni.control.protocol import ErrorCode, ProtocolError
 from patroni.control.rpc import AgentClient, AgentRpc
 from patroni.control.unix import peer_check, UnixServer
@@ -41,8 +43,9 @@ class TestControlUnix(unittest.TestCase):
         self.node = Mock()
         self.node.is_running.return_value = True
         self.monitor = AuthorityMonitor()
+        self.config_sink = Mock(return_value=ConfigApply.APPLIED)
         self.rpc = AgentRpc(
-            self.node, str(uuid4()), lambda: 1.0, self.monitor, Mock(),
+            self.node, str(uuid4()), lambda: 1.0, self.monitor, Mock(), self.config_sink,
         )
         self.server = UnixServer(self.path, self.rpc.handle, allow_peer)
 
@@ -69,6 +72,41 @@ class TestControlUnix(unittest.TestCase):
         )
 
         client.grant(grant)
+
+    def test_dynamic_configuration_and_telemetry_round_trip(self) -> None:
+        self.server.start()
+        client = AgentClient(self.path, peer_check=allow_peer)
+        plan = config_plan(8, {'postgresql': {'use_slots': False}})
+
+        self.assertEqual(ConfigApply.APPLIED, client.configure(plan))
+        telemetry = client.telemetry()
+
+        self.assertEqual(8, telemetry.config_revision)
+        self.assertEqual(plan.fingerprint, telemetry.config_fingerprint)
+        self.config_sink.assert_called_once_with(plan)
+
+    def test_client_rebinds_after_agent_restart(self) -> None:
+        self.server.start()
+        client = AgentClient(self.path, peer_check=allow_peer)
+        old_agent_id = client.agent_boot_id
+        self.server.close()
+        self.monitor.close()
+
+        self.monitor = AuthorityMonitor()
+        rpc = AgentRpc(self.node, str(uuid4()), lambda: 1.0, self.monitor, Mock(), self.config_sink)
+        self.server = UnixServer(self.path, rpc.handle, allow_peer)
+        self.server.start()
+
+        self.assertTrue(client.is_running())
+        self.assertNotEqual(old_agent_id, client.agent_boot_id)
+
+    def test_agent_accepts_restarted_controller(self) -> None:
+        self.server.start()
+        first = AgentClient(self.path, peer_check=allow_peer)
+        second = AgentClient(self.path, peer_check=allow_peer)
+
+        self.assertEqual(first.agent_boot_id, second.agent_boot_id)
+        self.assertTrue(second.is_running())
 
     def test_command_status_and_events_round_trip(self) -> None:
         self.server.start()
@@ -128,6 +166,21 @@ class TestControlUnix(unittest.TestCase):
         self.server.close()
 
         self.assertFalse(os.path.exists(self.path))
+
+    def test_status_fails_unknown_when_agent_is_down(self) -> None:
+        self.server.start()
+        client = AgentClient(self.path, peer_check=allow_peer)
+        self.server.close()
+
+        snapshot = client.snapshot(
+            SnapshotDetail.STATUS, Freshness.FRESH_RETRY, ObservationContext(None),
+        )
+
+        self.assertEqual(PostgresRole.UNKNOWN, snapshot.observed_role)
+        self.assertEqual(ObservationFailure.AGENT_UNAVAILABLE, snapshot.failure)
+
+        with self.assertRaises(ProtocolError):
+            client.snapshot(SnapshotDetail.BASIC, Freshness.FRESH, ObservationContext(None))
 
 
 def stat_is_socket(path):

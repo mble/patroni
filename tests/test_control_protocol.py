@@ -44,7 +44,7 @@ class TestControlProtocol(unittest.TestCase):
         self.assertIsInstance(decoded.operation, Operation)
 
     def test_hello_capabilities_round_trip(self) -> None:
-        hello = Hello(str(uuid4()), PROTOCOL_MAJOR, PROTOCOL_MINOR, tuple(Capability))
+        hello = Hello(str(uuid4()), PROTOCOL_MAJOR, PROTOCOL_MINOR, tuple(Capability), None, 0)
 
         self.assertEqual(hello, unpack(pack(hello)))
 

@@ -10,15 +10,15 @@ from .models import SlotCapabilities, SlotContext, SlotSpec, SyncContext, SyncSn
     SyncType, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 
 if TYPE_CHECKING:  # pragma: no cover
-    from patroni.watchdog import Watchdog
+    from patroni.watchdog import Watchdog as _Watchdog
 
-    from .node import NodeControl
+    from .node import NodeControl as _NodeControl
 
 
 class PostgresReplication:
-    """Keep host-local safety devices below NodeControl."""
+    """Keep host-local safety devices below ``NodeControl``."""
 
-    def __init__(self, postgresql: Any, watchdog: 'Watchdog', timing_revision: int = 0,
+    def __init__(self, postgresql: Any, watchdog: '_Watchdog', timing_revision: int = 0,
                  watchdog_config: Optional[Callable[[], Mapping[str, Any]]] = None) -> None:
         self._postgresql = postgresql
         self._watchdog = watchdog
@@ -116,9 +116,9 @@ class PostgresReplication:
 
 
 class NodeWatchdog:
-    """Preserve the HA watchdog interface through NodeControl."""
+    """Preserve the HA watchdog interface through ``NodeControl``."""
 
-    def __init__(self, node: 'NodeControl') -> None:
+    def __init__(self, node: '_NodeControl') -> None:
         self._node = node
 
     @property
