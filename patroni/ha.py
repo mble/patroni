@@ -14,15 +14,14 @@ from . import global_config, psycopg, thread_pool
 from .__main__ import Patroni
 from .async_executor import AsyncExecutor, CriticalTask
 from .collections import CaseInsensitiveSet
-from .control import CheckpointMode, CommandKind, CommandResult, CommandState, CommandValue, \
-    DesiredRole, EventKind, EventRecord, FollowTarget, Freshness, LifecycleCommand, NodeSnapshot, \
+from .control import BootstrapState, CallbackKind, CancelMode, CheckpointMode, CloneMode, \
+    CommandKind, CommandResult, CommandState, CommandValue, DesiredRole, DivergencePolicy, \
+    EventKind, EventRecord, FollowTarget, Freshness, LifecycleCommand, NodeSnapshot, \
     ObservationContext, PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, \
-    ReloadMode, SlotMode, SnapshotDetail, StopMode, SubmitState, TargetKind
+    RecoveryTarget, ReloadMode, SlotMode, SnapshotDetail, StopMode, SubmitState, TargetKind
 from .dcs import AbstractDCS, Cluster, Leader, Member, RemoteMember, Status, SyncState
 from .exceptions import DCSError, PatroniFatalException, PostgresConnectionException
-from .postgresql.callback_executor import CallbackAction
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
-from .postgresql.rewind import Rewind
 from .quorum import QuorumStateResolver
 from .tags import Tags
 from .utils import parse_int, polling_loop, tzutc
@@ -30,6 +29,19 @@ from .utils import parse_int, polling_loop, tzutc
 logger = logging.getLogger(__name__)
 
 COMMAND_WAIT_SECONDS = 0.05
+
+
+class _NodeCancellable:
+    """Adapt agent cancellation to the existing async scheduler."""
+
+    def __init__(self, node: Any) -> None:
+        self._node = node
+
+    def reset_is_cancelled(self) -> None:
+        self._node.reset_cancel()
+
+    def cancel(self) -> None:
+        self._node.cancel(CancelMode.NORMAL)
 
 
 def _command_value(result: CommandResult) -> Optional[bool]:
@@ -242,7 +254,6 @@ class Ha(object):
         self.patroni = patroni
         self.state_handler = patroni.postgresql
         self.node = patroni.node
-        self._rewind = Rewind(self.state_handler)
         self.dcs = patroni.dcs
         self.cluster = Cluster.empty()
         self.old_cluster = Cluster.empty()
@@ -256,7 +267,7 @@ class Ha(object):
         self._async_response = CriticalTask()
         self._crash_recovery_started = 0
         self._start_timeout = None
-        self._async_executor = AsyncExecutor(self.state_handler.cancellable, self.wakeup)
+        self._async_executor = AsyncExecutor(cast(Any, _NodeCancellable(self.node)), self.wakeup)
         self.watchdog = patroni.watchdog
 
         # Each member publishes various pieces of information to the DCS using touch_member. This lock protects
@@ -367,9 +378,15 @@ class Ha(object):
                    timeout: Optional[float] = None, stop_mode: StopMode = StopMode.FAST,
                    checkpoint: CheckpointMode = CheckpointMode.DEFAULT,
                    events: Tuple[EventKind, ...] = (), target: Optional[FollowTarget] = None,
-                   reload_mode: ReloadMode = ReloadMode.RESTART) -> LifecycleCommand:
+                   reload_mode: ReloadMode = ReloadMode.RESTART,
+                   recovery_target: Optional[RecoveryTarget] = None,
+                   clone_mode: CloneMode = CloneMode.CONFIGURED,
+                   divergence: DivergencePolicy = DivergencePolicy.NONE,
+                   callback: Optional[CallbackKind] = None,
+                   bootstrap_state: BootstrapState = BootstrapState.IDLE) -> LifecycleCommand:
         return LifecycleCommand(
             str(uuid.uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode,
+            recovery_target, clone_mode, divergence, callback, bootstrap_state,
         )
 
     def _stop_immediate(self) -> Optional[bool]:
@@ -379,6 +396,18 @@ class Ha(object):
             stop_mode=StopMode.IMMEDIATE,
         )
         return self._run_command(command)
+
+    def _reset_recovery(self) -> Optional[bool]:
+        return self._run_command(self._lifecycle(CommandKind.RESET_RECOVERY))
+
+    def _trigger_recovery(self) -> Optional[bool]:
+        return self._run_command(self._lifecycle(CommandKind.CHECK_DIVERGENCE))
+
+    def _callback(self, kind: CallbackKind) -> Optional[bool]:
+        return self._run_command(self._lifecycle(CommandKind.CALLBACK, callback=kind))
+
+    def _ensure_checkpoint(self) -> Optional[bool]:
+        return self._run_command(self._lifecycle(CommandKind.CHECKPOINT))
 
     @staticmethod
     def _desired_role(role: PostgresqlRole) -> DesiredRole:
@@ -410,6 +439,30 @@ class Ha(object):
             str(conn_kwargs.get('dbname')) if conn_kwargs.get('dbname') else None,
             member.primary_slot_name if isinstance(member, RemoteMember) else None,
             slot_mode,
+        )
+
+    @staticmethod
+    def _recovery_target(member: Union[Leader, Member, None]) -> Optional[RecoveryTarget]:
+        checkpoint = member.checkpoint_after_promote if isinstance(member, Leader) else None
+        if isinstance(member, Leader):
+            member = member.member
+        if member is None:
+            return None
+
+        conn_kwargs = member.conn_kwargs()
+        host = conn_kwargs.get('host')
+        role = member.data.get('role')
+        return RecoveryTarget(
+            TargetKind.REMOTE if isinstance(member, RemoteMember) else TargetKind.MEMBER,
+            member.name,
+            str(host) if host else None,
+            str(conn_kwargs.get('port')) if conn_kwargs.get('port') else None,
+            str(conn_kwargs.get('dbname')) if conn_kwargs.get('dbname') else None,
+            member.primary_slot_name if isinstance(member, RemoteMember) else None,
+            SlotMode.DISABLE
+            if isinstance(member, RemoteMember) and member.no_replication_slot else SlotMode.USE,
+            str(role) if role else None,
+            checkpoint,
         )
 
     def primary_stop_timeout(self) -> Union[int, None]:
@@ -602,7 +655,7 @@ class Ha(object):
             if proxy_url:
                 data['proxy_url'] = proxy_url
 
-            if self.is_leader() and not self._rewind.checkpoint_after_promote():
+            if self.is_leader() and not self.node.recovery().checkpoint_after_promote:
                 data['checkpoint_after_promote'] = False
             tags = self.get_effective_tags()
             if tags:
@@ -669,27 +722,34 @@ class Ha(object):
         if self.is_standby_cluster() and not isinstance(clone_member, RemoteMember):
             clone_member = self.get_remote_member(clone_member)
 
-        self._rewind.reset_state()
-        if self.state_handler.bootstrap.clone(clone_member, clone_from_leader):
-            logger.info('bootstrapped %s', msg)
-            cluster = self.dcs.get_cluster()
-            node_to_follow = self._get_node_to_follow(cluster)
-            command = self._lifecycle(
-                CommandKind.FOLLOW,
-                DesiredRole.REPLICA,
-                target=self._follow_target(node_to_follow),
-            )
-            return self._run_command(command) is not False
-        else:
-            logger.error('failed to bootstrap %s', msg)
-            self.state_handler.remove_data_directory()
+        mode = CloneMode.LEADER if clone_from_leader else CloneMode.CONFIGURED
+        command = self._lifecycle(
+            CommandKind.CLONE,
+            DesiredRole.REPLICA,
+            recovery_target=self._recovery_target(clone_member),
+            clone_mode=mode,
+        )
+        if self._run_command(command):
+            return self._follow_clone(msg)
+
+        logger.error('failed to bootstrap %s', msg)
+
+    def _follow_clone(self, msg: str) -> bool:
+        logger.info('bootstrapped %s', msg)
+        cluster = self.dcs.get_cluster()
+        node_to_follow = self._get_node_to_follow(cluster)
+        command = self._lifecycle(
+            CommandKind.FOLLOW,
+            DesiredRole.REPLICA,
+            target=self._follow_target(node_to_follow),
+        )
+        return self._run_command(command) is not False
 
     def bootstrap(self) -> str:
         # no initialize key and node is allowed to be primary and has 'bootstrap' section in a configuration file
         if self.cluster.is_unlocked() and self.cluster.initialize is None\
                 and not self.patroni.nofailover and 'bootstrap' in self.patroni.config:
             if self.dcs.initialize(create_new=True):  # race for initialization
-                self.state_handler.bootstrapping = True
                 with self._async_response:
                     self._async_response.reset()
 
@@ -697,8 +757,12 @@ class Ha(object):
                     ret = self._async_executor.try_run_async('bootstrap_standby_leader', self.bootstrap_standby_leader)
                     return ret or 'trying to bootstrap a new standby leader'
                 else:
-                    ret = self._async_executor.try_run_async('bootstrap', self.state_handler.bootstrap.bootstrap,
-                                                             args=(self.patroni.config['bootstrap'],))
+                    command = self._lifecycle(
+                        CommandKind.BOOTSTRAP,
+                        DesiredRole.PRIMARY,
+                        bootstrap_state=BootstrapState.RUNNING,
+                    )
+                    ret = self._async_executor.try_run_async('bootstrap', self._run_command, args=(command,))
                     return ret or 'trying to bootstrap a new cluster'
             else:
                 return 'failed to acquire initialize lock'
@@ -714,7 +778,7 @@ class Ha(object):
         # no leader, but configuration may allowed replica creation using backup tools
         create_replica_methods = global_config.get_standby_cluster_config().get('create_replica_methods', []) \
             if self.is_standby_cluster() else None
-        can_bootstrap = self.state_handler.can_create_replica_without_replication_connection(create_replica_methods)
+        can_bootstrap = self.node.can_clone(create_replica_methods)
         concurrent_bootstrap = self.cluster.initialize == ""
         if can_bootstrap and not concurrent_bootstrap:
             msg = 'bootstrap (without leader)'
@@ -737,28 +801,36 @@ class Ha(object):
         return result
 
     def _handle_crash_recovery(self) -> Optional[str]:
-        if self._crash_recovery_started == 0 and (self.cluster.is_unlocked() or self._rewind.can_rewind):
+        if self._crash_recovery_started == 0 and (self.cluster.is_unlocked() or self.node.can_rewind()):
             self._crash_recovery_started = time.time()
             msg = 'doing crash recovery in a single user mode'
-            return self._async_executor.try_run_async(msg, self._rewind.ensure_clean_shutdown) or msg
+            command = self._lifecycle(CommandKind.CRASH_RECOVERY)
+            return self._async_executor.try_run_async(msg, self._run_command, args=(command,)) or msg
 
     def _handle_rewind_or_reinitialize(self) -> Optional[str]:
         leader = self.get_remote_member() if self.is_standby_cluster() else self.cluster.leader
-        if not self._rewind.rewind_or_reinitialize_needed_and_possible(leader) or not leader:
+        target = self._recovery_target(leader)
+        if not self.node.rewind_needed(target) or not target:
             return None
 
-        if self._rewind.can_rewind:
+        if self.node.can_rewind():
             # rewind is required, but postgres wasn't shut down cleanly.
             if not self._is_running() and \
-                    self.state_handler.controldata().get('Database cluster state') == 'in archive recovery':
+                    self.node.controldata().get('Database cluster state') == 'in archive recovery':
                 msg = self._handle_crash_recovery()
                 if msg:
                     return msg
 
-            msg = 'running pg_rewind from ' + leader.name
-            return self._async_executor.try_run_async(msg, self._rewind.execute, args=(leader,)) or msg
+            msg = 'running pg_rewind from ' + target.name
+            command = self._lifecycle(
+                CommandKind.REWIND,
+                DesiredRole.REPLICA,
+                recovery_target=target,
+                divergence=DivergencePolicy.REWIND,
+            )
+            return self._async_executor.try_run_async(msg, self._run_command, args=(command,)) or msg
 
-        if self._rewind.should_remove_data_directory_on_diverged_timelines and not self.is_standby_cluster():
+        if self.node.recovery().remove_on_divergence and not self.is_standby_cluster():
             msg = 'reinitializing due to diverged timelines'
             return self._async_executor.try_run_async(msg, self._do_reinitialize, args=(self.cluster,)) or msg
 
@@ -799,7 +871,7 @@ class Ha(object):
         else:
             timeout = None
 
-        data = self.state_handler.controldata()
+        data = self.node.controldata()
         logger.info('pg_controldata:\n%s\n', '\n'.join('  {0}: {1}'.format(k, v) for k, v in data.items()))
 
         # timeout > 0 indicates that we still have the leader lock, and it was just updated
@@ -808,7 +880,7 @@ class Ha(object):
                                                            'shutting down', 'shut down')\
                 and self._pg_state() == PostgresqlState.CRASHED\
                 and self._pg_role() == PostgresqlRole.PRIMARY\
-                and not self.state_handler.config.recovery_conf_exists():
+                and not self.node.recovery_conf_exists():
             # We know 100% that we were running as a primary a few moments ago, therefore could just start postgres
             msg = 'starting primary after failure'
             command = self._lifecycle(CommandKind.START, timeout=timeout)
@@ -820,7 +892,7 @@ class Ha(object):
         self.watchdog.disable()
 
         if data.get('Database cluster state') in ('in production', 'shutting down', 'in crash recovery'):
-            if self.state_handler.was_restored_from_backup():
+            if self.node.restored_from_backup():
                 logger.info('Skipping single-user crash recovery because backup_label exists;'
                             ' PostgreSQL will handle it during normal startup')
             else:
@@ -832,12 +904,12 @@ class Ha(object):
 
         role = PostgresqlRole.REPLICA
         if self.has_lock() and not self.is_standby_cluster():
-            self._rewind.reset_state()  # we want to later trigger CHECKPOINT after promote
+            self._reset_recovery()  # we want to later trigger CHECKPOINT after promote
             msg = "starting as readonly because i had the session lock"
             node_to_follow = None
         else:
-            if not self._rewind.executed:
-                self._rewind.trigger_check_diverged_lsn()
+            if not self.node.recovery().executed:
+                self._trigger_recovery()
             msg = self._handle_rewind_or_reinitialize()
             if msg:
                 return msg
@@ -911,7 +983,8 @@ class Ha(object):
         node_to_follow = self._get_node_to_follow(self.cluster)
 
         if self.is_paused():
-            if not (self._rewind.is_needed and self._rewind.can_rewind_or_reinitialize_allowed)\
+            recovery = self.node.recovery()
+            if not (recovery.needed and (recovery.remove_on_divergence or self.node.can_rewind()))\
                     or self.cluster.is_unlocked():
                 if is_primary:
                     self.state_handler.set_role(PostgresqlRole.PRIMARY)
@@ -930,14 +1003,14 @@ class Ha(object):
 
         if self.is_standby_cluster() and self._leader_timeline and \
                 self.state_handler.get_history(self._leader_timeline + 1):
-            self._rewind.trigger_check_diverged_lsn()
+            self._trigger_recovery()
 
         msg = self._handle_rewind_or_reinitialize()
         if msg:
             return msg
 
         if not self.is_paused():
-            self.state_handler.handle_parameter_change()
+            self._run_command(self._lifecycle(CommandKind.APPLY_CONFIG))
 
         role = PostgresqlRole.STANDBY_LEADER \
             if isinstance(node_to_follow, RemoteMember) and self.has_lock(False) else PostgresqlRole.REPLICA
@@ -947,7 +1020,9 @@ class Ha(object):
                 and not (node_to_follow and node_to_follow.conn_url):
             return 'continue following the old known standby leader'
         else:
-            change_required, restart_required = self.state_handler.config.check_recovery_conf(node_to_follow)
+            config_change = self.node.check_recovery_conf(self._recovery_target(node_to_follow))
+            change_required = config_change.change_required
+            restart_required = config_change.restart_required
             if change_required:
                 if restart_required:
                     command = self._lifecycle(
@@ -965,14 +1040,14 @@ class Ha(object):
                         reload_mode=ReloadMode.RELOAD,
                     )
                     self._run_command(command)
-                self._rewind.trigger_check_diverged_lsn()
+                self._trigger_recovery()
             else:
                 if role == PostgresqlRole.STANDBY_LEADER and self._pg_role() != role:
                     self.state_handler.set_role(role)
-                    self.state_handler.call_nowait(CallbackAction.ON_ROLE_CHANGE)
+                    self._callback(CallbackKind.ROLE_CHANGE)
 
                 if self._last_timeline and self._leader_timeline and self._last_timeline < self._leader_timeline:
-                    self._rewind.trigger_check_diverged_lsn()
+                    self._trigger_recovery()
                     msg = self._handle_rewind_or_reinitialize()
                     if msg:
                         return msg
@@ -1021,8 +1096,7 @@ class Ha(object):
             logger.info("Disabled synchronous replication")
 
         # As synchronous_mode is off, check if the user configured Postgres synchronous replication instead
-        ssn = self.state_handler.config.synchronous_standby_names
-        self.state_handler.config.set_synchronous_standby_names(ssn)
+        self._run_command(self._lifecycle(CommandKind.APPLY_SYNC))
 
     def _handle_synchronous_strict_mode(self, dcs_state: SyncState, replication_state: Any) -> bool:
         """Handle strict synchronous mode.
@@ -1392,7 +1466,6 @@ class Ha(object):
                 self._last_timeline = None
 
                 def before_promote():
-                    self._rewind.reset_state()  # make sure we will trigger checkpoint after promote
                     self.notify_mpp_coordinator('before_promote')
 
                 with self._async_response:
@@ -1898,13 +1971,12 @@ class Ha(object):
 
         logger.info('Demoting self (%s)', mode)
 
-        self._rewind.trigger_check_diverged_lsn()
+        self._trigger_recovery()
 
         status = {'released': False}
 
         demote_cluster_with_archive = False
-        archive_cmd = self._rewind.get_archive_command()
-        if mode == 'demote-cluster' and archive_cmd is not None:
+        if mode == 'demote-cluster' and self.node.archive_ready():
             # We need to send the shutdown checkpoint WAL file to archive to eliminate the need of rewind
             # from a promoted instance that was previously replicating from archive
             # When doing this, we disable stop timeout, do not run on_shutdown callback and do not release
@@ -1980,7 +2052,7 @@ class Ha(object):
 
         if mode == 'demote-cluster':
             if demote_cluster_with_archive:
-                self._rewind.archive_shutdown_checkpoint_wal(cast(str, archive_cmd))
+                self._run_command(self._lifecycle(CommandKind.ARCHIVE_WAL))
             else:
                 logger.info('Not archiving latest checkpoint WAL file. Archiving is not configured.')
 
@@ -2008,7 +2080,7 @@ class Ha(object):
         if mode_control['async_req']:
             self._async_executor.try_run_async('starting after demotion', self._run_command, (command,))
         else:
-            if self._rewind.rewind_or_reinitialize_needed_and_possible(leader):
+            if self.node.rewind_needed(self._recovery_target(leader)):
                 return False  # do not start postgres, but run pg_rewind on the next iteration
             return self._run_command(command)
 
@@ -2139,7 +2211,7 @@ class Ha(object):
             # and therefore we trigger rewind checks on it, but only if not in pause, because there is no race in pause.
             if self.cluster.failover and self.cluster.failover.candidate or \
                     self.patroni.nofailover and not self.is_paused():
-                self._rewind.trigger_check_diverged_lsn()
+                self._trigger_recovery()
                 time.sleep(2)  # Give a time to somebody to take the leader lock
 
             if self.patroni.nofailover:
@@ -2165,7 +2237,7 @@ class Ha(object):
                     return msg
 
                 # check if the node is ready to be used by pg_rewind
-                self._rewind.ensure_checkpoint_after_promote(self.wakeup)
+                self._ensure_checkpoint()
 
                 if self.is_standby_cluster():
                     # in case of standby cluster we don't really need to
@@ -2327,10 +2399,6 @@ class Ha(object):
                 return (False, PostgresqlState.RESTART_FAILED)
 
     def _do_reinitialize(self, cluster: Cluster, from_leader: bool = False) -> Optional[bool]:
-        self._stop_immediate()
-        # Commented redundant data directory cleanup here
-        # self.state_handler.remove_data_directory()
-
         if from_leader:
             clone_member = cluster.leader
         else:
@@ -2338,7 +2406,19 @@ class Ha(object):
 
         if clone_member:
             member_role = 'leader' if clone_member == cluster.leader else 'replica'
-            return self.clone(clone_member, "from {0} '{1}'".format(member_role, clone_member.name), from_leader)
+            msg = "from {0} '{1}'".format(member_role, clone_member.name)
+            command = self._lifecycle(
+                CommandKind.REINITIALIZE,
+                DesiredRole.REPLICA,
+                timeout=self.patroni.config['retry_timeout'],
+                recovery_target=self._recovery_target(clone_member),
+                clone_mode=CloneMode.LEADER if from_leader else CloneMode.CONFIGURED,
+                divergence=DivergencePolicy.REINITIALIZE,
+            )
+            if self._run_command(command):
+                return self._follow_clone(msg)
+
+            logger.error('failed to bootstrap %s', msg)
 
     def reinitialize(self, force: bool = False, from_leader: bool = False) -> Optional[str]:
         with self._async_executor:
@@ -2370,12 +2450,12 @@ class Ha(object):
                 time_left = global_config.primary_start_timeout - (time.time() - self._crash_recovery_started)
                 if time_left <= 0 and self.is_failover_possible():
                     logger.info("Demoting self because crash recovery is taking too long")
-                    self.state_handler.cancellable.cancel(True)
+                    self.node.cancel(CancelMode.KILL)
                     self.demote('immediate')
                     return 'terminated crash recovery because of startup timeout'
 
             return 'updated leader lock during {0}'.format(self._async_executor.scheduled_action)
-        elif not self.state_handler.bootstrapping and not self.is_paused():
+        elif not self.node.recovery().bootstrapping and not self.is_paused():
             # Don't have lock, make sure we are not promoting or starting up a primary in the background
             if self._async_executor.scheduled_action == 'promote':
                 with self._async_response:
@@ -2409,7 +2489,7 @@ class Ha(object):
             if self.has_lock():
                 if self._pg_role() in (PostgresqlRole.PRIMARY, PostgresqlRole.STANDBY_LEADER):
                     self.state_handler.set_role(PostgresqlRole.DEMOTED)
-                    self.state_handler.call_nowait(CallbackAction.ON_ROLE_CHANGE)
+                    self._callback(CallbackKind.ROLE_CHANGE)
                 self._delete_leader()
                 return 'removed leader key after trying and failing to start postgres'
             return 'failed to start postgres'
@@ -2419,8 +2499,15 @@ class Ha(object):
         logger.info('removing initialize key after failed attempt to bootstrap the cluster')
         self.dcs.cancel_initialization()
         self._stop_immediate()
-        self.state_handler.move_data_directory()
+        self._run_command(self._lifecycle(CommandKind.MOVE_DATA))
         raise PatroniFatalException('Failed to bootstrap cluster')
+
+    def _post_bootstrap(self) -> Optional[bool]:
+        result = self._run_command(self._lifecycle(CommandKind.POST_BOOTSTRAP, DesiredRole.PRIMARY))
+        with self._async_response:
+            self._async_response.complete(result)
+
+        return result
 
     def post_bootstrap(self) -> str:
         with self._async_response:
@@ -2434,23 +2521,22 @@ class Ha(object):
                 return 'waiting for end of recovery after bootstrap'
 
             self.state_handler.set_role(PostgresqlRole.PRIMARY)
-            ret = self._async_executor.try_run_async('post_bootstrap', self.state_handler.bootstrap.post_bootstrap,
-                                                     args=(self.patroni.config['bootstrap'], self._async_response))
+            ret = self._async_executor.try_run_async('post_bootstrap', self._post_bootstrap)
             return ret or 'running post_bootstrap'
 
-        self.state_handler.bootstrapping = False
+        self._run_command(self._lifecycle(CommandKind.SET_BOOTSTRAP, bootstrap_state=BootstrapState.IDLE))
         if not self.watchdog.activate():
             logger.error('Cancelling bootstrap because watchdog activation failed')
             self.cancel_initialization()
 
-        self._rewind.ensure_checkpoint_after_promote(self.wakeup)
+        self._ensure_checkpoint()
         self.dcs.initialize(create_new=(self.cluster.initialize is None), sysid=self._node_state().system_identifier)
         self.dcs.set_config_value(json.dumps(self.patroni.config.dynamic_configuration, separators=(',', ':')))
         self.dcs.take_leader()
         self.set_is_leader(True)
         if self.is_synchronous_mode():
             self.state_handler.sync_handler.set_synchronous_standby_names([], global_config.min_synchronous_nodes)
-        self.state_handler.call_nowait(CallbackAction.ON_START)
+        self._callback(CallbackKind.START)
         self.load_cluster_from_dcs()
 
         return 'initialized a new cluster'
@@ -2528,7 +2614,7 @@ class Ha(object):
                     self.state_handler.schedule_sanity_checks_after_pause()
                     # during pause people could manually do something with Postgres, therefore we want
                     # to double check rewind conditions on replicas and maybe run CHECKPOINT on the primary
-                    self._rewind.reset_state()
+                    self._reset_recovery()
                 self._was_paused = False
 
             if not self.cluster.has_member(self.state_handler.name):
@@ -2553,13 +2639,13 @@ class Ha(object):
                 return msg
 
             # we've got here, so any async action has finished.
-            if self.state_handler.bootstrapping:
+            if self.node.recovery().bootstrapping:
                 return self.post_bootstrap()
 
             if self.recovering:
                 self.recovering = False
 
-                if not self._rewind.is_needed:
+                if not self.node.recovery().needed:
                     # Check if we tried to recover from postgres crash and failed
                     msg = self.post_recover()
                     if msg is not None:
@@ -2567,8 +2653,9 @@ class Ha(object):
 
                 # Reset some states after postgres successfully started up
                 self._crash_recovery_started = 0
-                if self._rewind.executed and not self._rewind.failed:
-                    self._rewind.reset_state()
+                recovery = self.node.recovery()
+                if recovery.executed and not recovery.failed:
+                    self._reset_recovery()
 
                 # The Raft cluster without a quorum takes a bit of time to stabilize.
                 # Therefore we want to postpone the leader race if we just started up.
@@ -2579,7 +2666,7 @@ class Ha(object):
             data_directory_error = ''
             data_directory_is_empty = None
             try:
-                data_directory_is_empty = self.state_handler.data_directory_empty()
+                data_directory_is_empty = self.node.data_empty()
                 data_directory_is_accessible = True
             except OSError as e:
                 data_directory_is_accessible = False
@@ -2622,7 +2709,7 @@ class Ha(object):
                             logger.fatal('system ID mismatch, node %s belongs to a different cluster: %s != %s',
                                          self.state_handler.name, self.cluster.initialize, data_sysid)
                             sys.exit(1)
-                elif self.cluster.is_unlocked() and not self.is_paused() and not self.state_handler.cb_called:
+                elif self.cluster.is_unlocked() and not self.is_paused() and not self.node.recovery().callback_called:
                     # "bootstrap", but data directory is not empty
                     if self._is_running() and not self.node.is_primary():
                         self._join_aborted = True
@@ -2634,6 +2721,7 @@ class Ha(object):
             if not self.state_handler.is_healthy():
                 if self.is_paused():
                     self.state_handler.set_state(PostgresqlState.STOPPED)
+                    recovery = self.node.recovery()
                     if self.has_lock():
                         self._delete_leader()
                         return 'removed leader lock because postgres is not running'
@@ -2642,8 +2730,8 @@ class Ha(object):
                     # the demote code follows through to starting Postgres right away, however, in the rewind case
                     # it returns from demote and reaches this point to start PostgreSQL again after rewind. In that
                     # case it makes no sense to continue to recover() unless rewind has finished successfully.
-                    elif self._rewind.failed or not self._rewind.executed and not \
-                            (self._rewind.is_needed and self._rewind.can_rewind_or_reinitialize_allowed):
+                    elif recovery.failed or not recovery.executed and not \
+                            (recovery.needed and (recovery.remove_on_divergence or self.node.can_rewind())):
                         return 'postgres is not running'
 
                 if self._pg_state() in (PostgresqlState.RUNNING, PostgresqlState.STARTING):
@@ -2666,10 +2754,10 @@ class Ha(object):
             if (not self._async_executor.busy or is_promoting) and not self._is_starting():
                 create_slots = self._sync_replication_slots(False)
 
-                if not self.state_handler.cb_called:
+                if not self.node.recovery().callback_called:
                     if not is_promoting and not self.node.is_primary():
-                        self._rewind.trigger_check_diverged_lsn()
-                    self.state_handler.call_nowait(CallbackAction.ON_START)
+                        self._trigger_recovery()
+                    self._callback(CallbackKind.START)
 
                 if not is_promoting and create_slots and self.cluster.leader:
                     err = self._async_executor.try_run_async('copy_logical_slots',

@@ -6,9 +6,9 @@ from threading import Event, Thread
 from unittest.mock import Mock
 from uuid import uuid4
 
-from patroni.control import CommandKind, DesiredRole
-from patroni.control.commands import CheckpointMode, CommandValue, DriverResult, EventChannel, \
-    EventKind, FollowTarget, LifecycleCommand, ReloadMode, SlotMode, StopMode, TargetKind
+from patroni.control import BootstrapState, CallbackKind, CloneMode, CommandKind, DesiredRole, DivergencePolicy
+from patroni.control.commands import CheckpointMode, CommandValue, DriverResult, EventChannel, EventKind, \
+    FollowTarget, LifecycleCommand, RecoveryTarget, ReloadMode, SlotMode, StopMode, TargetKind
 from patroni.control.postgres_commands import PostgresCommandDriver
 from patroni.postgresql.misc import PostgresqlRole
 from patroni.postgresql.postmaster import PostmasterProcess
@@ -16,9 +16,14 @@ from patroni.postgresql.postmaster import PostmasterProcess
 
 def command(kind, role=DesiredRole.UNCHANGED, timeout=1.0,
             stop_mode=StopMode.FAST, checkpoint=CheckpointMode.DEFAULT, target=None,
-            reload_mode=ReloadMode.RESTART):
+            reload_mode=ReloadMode.RESTART, recovery_target=None,
+            clone_mode=CloneMode.CONFIGURED, divergence=DivergencePolicy.NONE,
+            callback=None, bootstrap_state=BootstrapState.IDLE):
     events = (EventKind.SAFEPOINT, EventKind.BEFORE_SHUTDOWN, EventKind.SHUTDOWN)
-    return LifecycleCommand(str(uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode)
+    return LifecycleCommand(
+        str(uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode,
+        recovery_target, clone_mode, divergence, callback, bootstrap_state,
+    )
 
 
 def next_event(channel, sequence):
@@ -136,6 +141,64 @@ class TestPostgresCommandDriver(unittest.TestCase):
                          member.data['conn_kwargs'])
         self.assertNotIn('password', repr(member))
         self.assertTrue(self.postgresql.follow.call_args.kwargs['do_reload'])
+
+    def test_rewind_uses_typed_policy(self) -> None:
+        recovery = Mock()
+        recovery.execute.return_value = True
+        driver = PostgresCommandDriver(self.postgresql, recovery)
+        target = RecoveryTarget(
+            TargetKind.MEMBER, 'leader', '127.0.0.1', '5432', 'postgres', None,
+            SlotMode.USE, 'primary', True,
+        )
+        request = command(
+            CommandKind.REWIND,
+            DesiredRole.REPLICA,
+            recovery_target=target,
+            divergence=DivergencePolicy.REWIND,
+        )
+
+        result = driver.run(request, EventChannel(request.command_id), self.cancelled)
+
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), result)
+        recovery.execute.assert_called_once_with(target)
+        self.assertNotIn('password', repr(request))
+
+    def test_failed_clone_cleans_pgdata(self) -> None:
+        recovery = Mock()
+        recovery.clone.return_value = False
+        driver = PostgresCommandDriver(self.postgresql, recovery)
+        request = command(CommandKind.CLONE, DesiredRole.REPLICA)
+
+        result = driver.run(request, EventChannel(request.command_id), self.cancelled)
+
+        self.assertEqual(DriverResult(CommandValue.FALSE, None, None), result)
+        recovery.remove_data.assert_called_once_with()
+
+    def test_callback_is_allowlisted(self) -> None:
+        recovery = Mock()
+        driver = PostgresCommandDriver(self.postgresql, recovery)
+        request = command(CommandKind.CALLBACK, callback=CallbackKind.START)
+
+        result = driver.run(request, EventChannel(request.command_id), self.cancelled)
+
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), result)
+        recovery.callback.assert_called_once_with(CallbackKind.START)
+
+    def test_bootstrap_sets_running_state_first(self) -> None:
+        calls = []
+        recovery = Mock()
+        recovery.set_bootstrapping.side_effect = lambda state: calls.append(('state', state))
+        recovery.bootstrap.side_effect = lambda: calls.append(('bootstrap', None)) or True
+        driver = PostgresCommandDriver(self.postgresql, recovery)
+        request = command(
+            CommandKind.BOOTSTRAP,
+            DesiredRole.PRIMARY,
+            bootstrap_state=BootstrapState.RUNNING,
+        )
+
+        driver.run(request, EventChannel(request.command_id), self.cancelled)
+
+        self.assertEqual([('state', BootstrapState.RUNNING), ('bootstrap', None)], calls)
 
 
 if __name__ == '__main__':

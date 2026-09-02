@@ -6,21 +6,41 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from enum import Enum
 from threading import Condition, Event, RLock, Thread
-from typing import cast, List, NamedTuple, Optional, Tuple
+from typing import cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
 from .models import CommandKind, CommandState, DesiredRole
 
+if TYPE_CHECKING:  # pragma: no cover
+    from .journal import CommandJournal
+
 MAX_COMMAND_HISTORY = 4096
 MAX_COMMAND_EVENTS = 128
 MAX_TARGET_TEXT = 4096
-LIFECYCLE_KINDS = frozenset((
+AGENT_KINDS = frozenset((
     CommandKind.START,
     CommandKind.STOP,
     CommandKind.RESTART,
     CommandKind.PROMOTE,
     CommandKind.FOLLOW,
     CommandKind.FENCE,
+    CommandKind.BOOTSTRAP,
+    CommandKind.CLONE,
+    CommandKind.REWIND,
+    CommandKind.CRASH_RECOVERY,
+    CommandKind.POST_BOOTSTRAP,
+    CommandKind.REINITIALIZE,
+    CommandKind.APPLY_CONFIG,
+    CommandKind.APPLY_SYNC,
+    CommandKind.APPLY_SLOTS,
+    CommandKind.CALLBACK,
+    CommandKind.REMOVE_DATA,
+    CommandKind.MOVE_DATA,
+    CommandKind.SET_BOOTSTRAP,
+    CommandKind.RESET_RECOVERY,
+    CommandKind.CHECK_DIVERGENCE,
+    CommandKind.CHECKPOINT,
+    CommandKind.ARCHIVE_WAL,
 ))
 
 
@@ -46,6 +66,42 @@ class ReloadMode(str, Enum):
 
     RESTART = 'restart'
     RELOAD = 'reload'
+
+
+class CloneMode(str, Enum):
+    """Replica source selection policy."""
+
+    CONFIGURED = 'configured'
+    LEADER = 'leader'
+
+
+class BootstrapState(str, Enum):
+    """Bootstrap activity state."""
+
+    IDLE = 'idle'
+    RUNNING = 'running'
+
+
+class CancelMode(str, Enum):
+    """Agent subprocess cancellation mode."""
+
+    NORMAL = 'normal'
+    KILL = 'kill'
+
+
+class CallbackKind(str, Enum):
+    """Allowlisted PostgreSQL callback."""
+
+    START = 'on_start'
+    ROLE_CHANGE = 'on_role_change'
+
+
+class DivergencePolicy(str, Enum):
+    """Controller-selected divergence action."""
+
+    NONE = 'none'
+    REWIND = 'rewind'
+    REINITIALIZE = 'reinitialize'
 
 
 class TargetKind(str, Enum):
@@ -110,6 +166,20 @@ class FollowTarget(NamedTuple):
     slot_mode: SlotMode
 
 
+class RecoveryTarget(NamedTuple):
+    """Credential-free rewind source."""
+
+    kind: TargetKind
+    name: str
+    host: Optional[str]
+    port: Optional[str]
+    database: Optional[str]
+    slot_name: Optional[str]
+    slot_mode: SlotMode
+    role: Optional[str]
+    checkpoint_after_promote: Optional[bool]
+
+
 class LifecycleCommand(NamedTuple):
     """Bounded lifecycle command data."""
 
@@ -122,6 +192,11 @@ class LifecycleCommand(NamedTuple):
     events: Tuple[EventKind, ...]
     follow_target: Optional[FollowTarget]
     reload: ReloadMode
+    recovery_target: Optional[RecoveryTarget]
+    clone_mode: CloneMode
+    divergence: DivergencePolicy
+    callback: Optional[CallbackKind]
+    bootstrap_state: BootstrapState
 
 
 class DriverResult(NamedTuple):
@@ -259,8 +334,9 @@ class _Entry:
 class AgentCommands:
     """Run one agent mutation while observations remain responsive."""
 
-    def __init__(self, driver: CommandDriver) -> None:
+    def __init__(self, driver: CommandDriver, journal: Optional['CommandJournal'] = None) -> None:
         self._driver = driver
+        self._journal = journal
         self._lock = RLock()
         self._entries: 'OrderedDict[str, _Entry]' = OrderedDict()
         self._active: Optional[str] = None
@@ -274,6 +350,17 @@ class AgentCommands:
             if entry:
                 state = SubmitState.REPLAYED if entry.result.request == command else SubmitState.CONFLICT
                 return CommandSubmission(state, entry.result)
+            if self._journal:
+                from .journal import JournalError
+                try:
+                    result = self._journal.get(command)
+                except JournalError:
+                    return CommandSubmission(SubmitState.CONFLICT, None)
+                if result:
+                    entry = _Entry(result)
+                    entry.done.set()
+                    self._entries[command.command_id] = entry
+                    return CommandSubmission(SubmitState.REPLAYED, result)
             if self._active is not None:
                 return CommandSubmission(SubmitState.BUSY, None)
             if self._closed.is_set():
@@ -366,6 +453,14 @@ class AgentCommands:
                 driver_result.checkpoint_location,
                 driver_result.previous_location,
             )
+            if self._journal:
+                try:
+                    self._journal.put(entry.result)
+                except Exception:
+                    entry.result = CommandResult(
+                        entry.result.request, CommandState.FAILED, CommandValue.NONE, None, None,
+                    )
+                    self._closed.set()
             entry.done.set()
             self._active = None
             self._trim()
@@ -382,7 +477,7 @@ def _command(value: object) -> None:
     if not isinstance(value, LifecycleCommand):
         raise ValueError('invalid lifecycle command')
     _command_id(value.command_id)
-    if not isinstance(cast(object, value.kind), CommandKind) or value.kind not in LIFECYCLE_KINDS:
+    if not isinstance(cast(object, value.kind), CommandKind) or value.kind not in AGENT_KINDS:
         raise ValueError('invalid lifecycle command kind')
     if not isinstance(cast(object, value.target_role), DesiredRole):
         raise ValueError('invalid target role')
@@ -396,6 +491,34 @@ def _command(value: object) -> None:
     _target(value.follow_target)
     if not isinstance(cast(object, value.reload), ReloadMode):
         raise ValueError('invalid reload mode')
+    _recovery_target(value.recovery_target)
+    if not isinstance(cast(object, value.clone_mode), CloneMode):
+        raise ValueError('invalid clone mode')
+    if not isinstance(cast(object, value.divergence), DivergencePolicy):
+        raise ValueError('invalid divergence policy')
+    if value.callback is not None and not isinstance(cast(object, value.callback), CallbackKind):
+        raise ValueError('invalid callback')
+    if not isinstance(cast(object, value.bootstrap_state), BootstrapState):
+        raise ValueError('invalid bootstrap state')
+    if value.follow_target is not None and value.kind != CommandKind.FOLLOW:
+        raise ValueError('follow target is not allowed')
+    recovery_kinds = (CommandKind.CLONE, CommandKind.REWIND, CommandKind.REINITIALIZE)
+    if value.recovery_target is not None and value.kind not in recovery_kinds:
+        raise ValueError('recovery target is not allowed')
+    if value.kind in (CommandKind.REWIND, CommandKind.REINITIALIZE) and value.recovery_target is None:
+        raise ValueError('recovery target is required')
+    if value.clone_mode != CloneMode.CONFIGURED and value.kind not in (CommandKind.CLONE, CommandKind.REINITIALIZE):
+        raise ValueError('clone mode is not allowed')
+    expected_policy = {
+        CommandKind.REWIND: DivergencePolicy.REWIND,
+        CommandKind.REINITIALIZE: DivergencePolicy.REINITIALIZE,
+    }.get(value.kind, DivergencePolicy.NONE)
+    if value.divergence != expected_policy:
+        raise ValueError('invalid divergence policy')
+    if value.callback is not None and value.kind != CommandKind.CALLBACK:
+        raise ValueError('callback is not allowed')
+    if value.kind == CommandKind.CALLBACK and value.callback is None:
+        raise ValueError('callback is required')
     _timeout(value.timeout)
 
 
@@ -440,3 +563,21 @@ def _target(value: object) -> None:
     if raw_slot is not None and (not isinstance(raw_slot, str)
                                  or len(raw_slot) > MAX_TARGET_TEXT or '\x00' in raw_slot):
         raise ValueError('invalid follow slot')
+
+
+def _recovery_target(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, RecoveryTarget):
+        raise ValueError('invalid recovery target')
+    if not isinstance(cast(object, value.kind), TargetKind) \
+            or not isinstance(cast(object, value.slot_mode), SlotMode):
+        raise ValueError('invalid recovery target mode')
+    for text in (value.name, value.host, value.port, value.database, value.slot_name, value.role):
+        raw_text = cast(object, text)
+        if raw_text is not None and (not isinstance(raw_text, str)
+                                     or len(raw_text) > MAX_TARGET_TEXT or '\x00' in raw_text):
+            raise ValueError('invalid recovery target field')
+    checkpoint = cast(object, value.checkpoint_after_promote)
+    if checkpoint is not None and not isinstance(checkpoint, bool):
+        raise ValueError('invalid recovery checkpoint state')

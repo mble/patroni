@@ -3,7 +3,8 @@ import unittest
 from threading import Event
 from uuid import uuid4
 
-from patroni.control import CommandKind, CommandState, DesiredRole
+from patroni.control import BootstrapState, CallbackKind, CloneMode, \
+    CommandKind, CommandState, DesiredRole, DivergencePolicy
 from patroni.control.commands import AckState, AgentCommands, CheckpointMode, \
     CommandDriver, CommandResult, CommandValue, DriverResult, EventChannel, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
@@ -44,6 +45,11 @@ def command(command_id=None, kind=CommandKind.STOP):
         (EventKind.SAFEPOINT, EventKind.BEFORE_SHUTDOWN, EventKind.SHUTDOWN),
         None,
         ReloadMode.RESTART,
+        None,
+        CloneMode.CONFIGURED,
+        DivergencePolicy.NONE,
+        None,
+        BootstrapState.IDLE,
     )
 
 
@@ -141,12 +147,25 @@ class TestAgentCommands(unittest.TestCase):
         request = LifecycleCommand(
             'not-a-uuid', CommandKind.STOP, DesiredRole.UNCHANGED, None,
             StopMode.FAST, CheckpointMode.DEFAULT, (), None, ReloadMode.RESTART,
+            None, CloneMode.CONFIGURED, DivergencePolicy.NONE, None, BootstrapState.IDLE,
         )
 
         with self.assertRaises(ValueError):
             self.commands.submit(request)
 
         self.assertFalse(self.driver.entered.is_set())
+
+    def test_recovery_fields_are_kind_bound(self) -> None:
+        request = command()._replace(callback=CallbackKind.START)
+
+        with self.assertRaises(ValueError):
+            self.commands.submit(request)
+
+    def test_rewind_requires_target_and_policy(self) -> None:
+        request = command(kind=CommandKind.REWIND)._replace(divergence=DivergencePolicy.REWIND)
+
+        with self.assertRaises(ValueError):
+            self.commands.submit(request)
 
     def test_result_repr_has_no_exception_detail(self) -> None:
         result = CommandResult(command(), CommandState.FAILED, CommandValue.NONE, None, None)

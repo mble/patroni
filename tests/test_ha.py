@@ -11,11 +11,12 @@ import etcd
 from patroni import global_config
 from patroni.collections import CaseInsensitiveSet
 from patroni.config import Config
-from patroni.control import AgentCommands, CheckpointMode, CommandKind, CommandResult, \
-    CommandState, CommandSubmission, CommandValue, DesiredRole, EventKind, EventRecord, \
-    InProcessNodeControl, LifecycleCommand, ReloadMode, StopMode, SubmitState
+from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, CommandKind, \
+    CommandResult, CommandState, CommandSubmission, CommandValue, DesiredRole, DivergencePolicy, \
+    EventKind, EventRecord, InProcessNodeControl, LifecycleCommand, ReloadMode, StopMode, SubmitState
 from patroni.control.postgres import LocalPostgresObserver
 from patroni.control.postgres_commands import PostgresCommandDriver
+from patroni.control.recovery import PostgresRecovery
 from patroni.dcs import Cluster, ClusterConfig, Failover, get_dcs, \
     Leader, Member, RemoteMember, Status, SyncState, TimelineHistory
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
@@ -163,9 +164,10 @@ zookeeper:
         self.config = Config(None)
         self.version = '1.5.7'
         self.postgresql = p
-        commands = AgentCommands(PostgresCommandDriver(p))
+        recovery = PostgresRecovery(p, lambda: None, self.config.get('bootstrap'))
+        commands = AgentCommands(PostgresCommandDriver(p, recovery))
         self.node = InProcessNodeControl(
-            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0, commands,
+            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0, commands, recovery,
         )
         self.dcs = d
         self.api = Mock()
@@ -259,13 +261,17 @@ class TestHa(PostgresInit):
                        'self.state_handler.sysid', 'self.state_handler.server_version',
                        'self.state_handler.pending_restart_reason', 'self.state_handler.start',
                        'self.state_handler.stop', 'self.state_handler.restart', 'self.state_handler.promote',
-                       'self.state_handler.follow', 'self.state_handler.terminate_starting_postmaster'):
+                       'self.state_handler.follow', 'self.state_handler.terminate_starting_postmaster',
+                       'self.state_handler.bootstrap', 'self.state_handler.config',
+                       'self.state_handler.cancellable', 'self.state_handler.call_nowait',
+                       'self.state_handler.controldata', 'self.state_handler.data_directory_empty'):
             self.assertNotIn(access, source)
 
     def test_lifecycle_command_events_are_acked(self):
         request = LifecycleCommand(
             str(uuid.uuid4()), CommandKind.STOP, DesiredRole.UNCHANGED, 1,
             StopMode.FAST, CheckpointMode.DEFAULT, (EventKind.SAFEPOINT,), None, ReloadMode.RESTART,
+            None, CloneMode.CONFIGURED, DivergencePolicy.NONE, None, BootstrapState.IDLE,
         )
         running = CommandResult(request, CommandState.RUNNING, CommandValue.NONE, None, None)
         succeeded = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None)
@@ -402,7 +408,7 @@ class TestHa(PostgresInit):
         self.p.is_running = false
         self.p.controldata = lambda: {'Database cluster state': 'in archive recovery',
                                       'Database system identifier': SYSID}
-        self.ha._rewind.trigger_check_diverged_lsn()
+        self.ha._trigger_recovery()
         self.ha.cluster = get_cluster_initialized_with_leader()
         self.assertEqual(self.ha.run_cycle(), 'doing crash recovery in a single user mode')
 
@@ -414,9 +420,9 @@ class TestHa(PostgresInit):
         self.p.is_running = false
         self.ha.cluster = get_cluster_initialized_with_leader()
         self.ha.cluster.leader.member.data.update(version='2.0.2', role=PostgresqlRole.PRIMARY)
-        self.ha._rewind.pg_rewind = true
-        self.ha._rewind.check_leader_is_not_in_recovery = true
-        with patch.object(Rewind, 'rewind_or_reinitialize_needed_and_possible', Mock(return_value=True)):
+        with patch.object(Rewind, 'rewind_or_reinitialize_needed_and_possible', Mock(return_value=True)), \
+                patch.object(Rewind, 'pg_rewind', true), \
+                patch.object(Rewind, 'check_leader_is_not_in_recovery', true):
             self.assertEqual(self.ha.run_cycle(), 'running pg_rewind from leader')
         with patch.object(Rewind, 'rewind_or_reinitialize_needed_and_possible', Mock(return_value=False)), \
                 patch.object(Ha, 'is_synchronous_mode', Mock(return_value=True)):
@@ -924,7 +930,7 @@ class TestHa(PostgresInit):
         self.ha.cluster = get_cluster_initialized_with_leader(Failover(0, self.p.name, '', None, None))
         self.assertEqual(self.ha.run_cycle(), 'switchover: demoting myself')
 
-        self.ha._rewind.rewind_or_reinitialize_needed_and_possible = true
+        self.ha.node.rewind_needed = true
         self.assertEqual(self.ha.run_cycle(), 'switchover: demoting myself')
 
         # other members with failover_limitation_s
@@ -1366,7 +1372,13 @@ class TestHa(PostgresInit):
         self.ha.has_lock = false
         self.assertEqual(self.ha.post_recover(), 'failed to start postgres')
         leader = Leader(0, 0, Member(0, 'l', 2, {"version": "1.6", "conn_url": "postgres://a", "role": "primary"}))
-        self.ha._rewind.execute(leader)
+        command = self.ha._lifecycle(
+            CommandKind.REWIND,
+            DesiredRole.REPLICA,
+            recovery_target=self.ha._recovery_target(leader),
+            divergence=DivergencePolicy.REWIND,
+        )
+        self.ha._run_command(command)
         self.p.is_running = true
         self.assertIsNone(self.ha.post_recover())
 

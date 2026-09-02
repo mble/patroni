@@ -60,6 +60,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         from patroni.control import AgentCommands, InProcessNodeControl
         from patroni.control.postgres import LocalPostgresObserver
         from patroni.control.postgres_commands import PostgresCommandDriver
+        from patroni.control.recovery import PostgresRecovery
         from patroni.dcs import get_dcs
         from patroni.ha import Ha
         from patroni.postgresql import Postgresql
@@ -92,9 +93,10 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         global_config.update(None, self.config.dynamic_configuration)
 
         self.postgresql = Postgresql(self.config['postgresql'], self.dcs.mpp)
-        commands = AgentCommands(PostgresCommandDriver(self.postgresql))
+        recovery = PostgresRecovery(self.postgresql, lambda: self.ha.wakeup(), self.config.get('bootstrap'))
+        commands = AgentCommands(PostgresCommandDriver(self.postgresql, recovery))
         self.node = InProcessNodeControl(
-            str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic, commands,
+            str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic, commands, recovery,
         )
         self.api = RestApiServer(self, self.config['restapi'])
         self.ha = Ha(self)

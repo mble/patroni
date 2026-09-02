@@ -38,8 +38,19 @@ class CommandKind(str, Enum):
     PROMOTE = 'promote'
     FOLLOW = 'follow'
     BOOTSTRAP = 'bootstrap'
+    CLONE = 'clone'
+    REWIND = 'rewind'
+    CRASH_RECOVERY = 'crash_recovery'
+    POST_BOOTSTRAP = 'post_bootstrap'
     REINITIALIZE = 'reinitialize'
     APPLY_CONFIG = 'apply_config'
+    CALLBACK = 'callback'
+    REMOVE_DATA = 'remove_data'
+    MOVE_DATA = 'move_data'
+    SET_BOOTSTRAP = 'set_bootstrap'
+    RESET_RECOVERY = 'reset_recovery'
+    CHECK_DIVERGENCE = 'check_divergence'
+    ARCHIVE_WAL = 'archive_wal'
     APPLY_SYNC = 'apply_sync'
     APPLY_SLOTS = 'apply_slots'
     CHECKPOINT = 'checkpoint'
@@ -144,6 +155,25 @@ class ObservationFailure(str, Enum):
     QUERY_FAILED = 'query_failed'
     INCONSISTENT = 'inconsistent'
     LIMIT_EXCEEDED = 'limit_exceeded'
+
+
+class RecoverySnapshot(NamedTuple):
+    """Agent-owned rewind state used by HA policy."""
+
+    needed: bool
+    executed: bool
+    failed: bool
+    checkpoint_after_promote: bool
+    remove_on_divergence: bool
+    bootstrapping: bool
+    callback_called: bool
+
+
+class ConfigChange(NamedTuple):
+    """Recovery configuration action required by PostgreSQL."""
+
+    change_required: bool
+    restart_required: bool
 
 
 class SafetyAction(str, Enum):

@@ -5,16 +5,21 @@ import json
 from abc import ABC, abstractmethod
 from enum import Enum
 from threading import RLock
-from typing import Callable, cast, Dict, List, Mapping, Optional, Sequence, Tuple, Type
+from typing import Callable, cast, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TYPE_CHECKING
 from uuid import UUID
 
 from patroni.exceptions import PostgresConnectionException
 from patroni.psycopg import Error
 from patroni.utils import RetryFailedError
 
-from .commands import AgentCommands, CommandResult, CommandSubmission, EventRecord, LifecycleCommand
-from .models import Freshness, LocalPostgres, NodeSnapshot, ObservationContext, ObservationFailure, \
-    PostgresRole, PostgresState, QueryMode, ReplicationConnection, SnapshotDetail, TimelineWal, WalObservation
+from .commands import AgentCommands, CancelMode, CommandResult, \
+    CommandSubmission, EventRecord, LifecycleCommand, RecoveryTarget
+from .models import ConfigChange, Freshness, LocalPostgres, NodeSnapshot, \
+    ObservationContext, ObservationFailure, PostgresRole, PostgresState, QueryMode, \
+    RecoverySnapshot, ReplicationConnection, SnapshotDetail, TimelineWal, WalObservation
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .recovery import PostgresRecovery
 
 MAX_CONSISTENCY_ATTEMPTS = 2
 MAX_REPLICATION_CONNECTIONS = 4096
@@ -175,12 +180,61 @@ class NodeControl(ABC):
     def server_version(self) -> int:
         """Return connected PostgreSQL version."""
 
+    @abstractmethod
+    def recovery(self) -> RecoverySnapshot:
+        """Return agent-owned recovery state."""
+
+    @abstractmethod
+    def can_rewind(self) -> bool:
+        """Return whether local rewind is available."""
+
+    @abstractmethod
+    def rewind_needed(self, target: Optional[RecoveryTarget]) -> bool:
+        """Check whether a source requires rewind."""
+
+    @abstractmethod
+    def archive_ready(self) -> bool:
+        """Return whether shutdown WAL archiving is configured."""
+
+    @abstractmethod
+    def can_clone(self, methods: Optional[Sequence[str]]) -> bool:
+        """Return whether a replica method can run without a source."""
+
+    @abstractmethod
+    def data_empty(self) -> bool:
+        """Return whether PGDATA is empty."""
+
+    @abstractmethod
+    def controldata(self) -> Dict[str, str]:
+        """Return bounded pg_controldata fields."""
+
+    @abstractmethod
+    def restored_from_backup(self) -> bool:
+        """Return whether backup_label exists."""
+
+    @abstractmethod
+    def recovery_conf_exists(self) -> bool:
+        """Return whether recovery configuration exists."""
+
+    @abstractmethod
+    def check_recovery_conf(self, target: Optional[RecoveryTarget]) -> ConfigChange:
+        """Return required recovery configuration action."""
+
+    @abstractmethod
+    def cancel(self, mode: CancelMode) -> None:
+        """Cancel the active agent subprocess."""
+
+    @abstractmethod
+    def reset_cancel(self) -> None:
+        """Reset agent subprocess cancellation state."""
+
 
 class InProcessNodeControl(NodeControl):
     """Collect snapshots through the same API a future agent client uses."""
 
     def __init__(self, agent_boot_id: str, observer: PostgresObserver,
-                 clock: Callable[[], float], commands: Optional[AgentCommands] = None) -> None:
+                 clock: Callable[[], float], commands: Optional[AgentCommands] = None,
+                 recovery: Optional['PostgresRecovery'] = None) -> None:
         if agent_boot_id != str(UUID(agent_boot_id)):
             raise ValueError('agent_boot_id is not a canonical UUID')
 
@@ -188,6 +242,7 @@ class InProcessNodeControl(NodeControl):
         self._observer = observer
         self._clock = clock
         self._commands = commands
+        self._recovery = recovery
         self._lock = RLock()
         self._sequence = 0
         self._cache: Dict[SnapshotDetail, NodeSnapshot] = {}
@@ -289,6 +344,48 @@ class InProcessNodeControl(NodeControl):
     def server_version(self) -> int:
         with self._lock:
             return self._observer.server_version()
+
+    def recovery(self) -> RecoverySnapshot:
+        return self._recovery_service().snapshot()
+
+    def can_rewind(self) -> bool:
+        return self._recovery_service().can_rewind()
+
+    def rewind_needed(self, target: Optional[RecoveryTarget]) -> bool:
+        return self._recovery_service().needed(target)
+
+    def archive_ready(self) -> bool:
+        return self._recovery_service().archive_enabled()
+
+    def can_clone(self, methods: Optional[Sequence[str]]) -> bool:
+        return self._recovery_service().can_clone(methods)
+
+    def data_empty(self) -> bool:
+        return self._recovery_service().data_empty()
+
+    def controldata(self) -> Dict[str, str]:
+        return self._recovery_service().controldata()
+
+    def restored_from_backup(self) -> bool:
+        return self._recovery_service().restored()
+
+    def recovery_conf_exists(self) -> bool:
+        return self._recovery_service().recovery_conf_exists()
+
+    def check_recovery_conf(self, target: Optional[RecoveryTarget]) -> ConfigChange:
+        return self._recovery_service().check_recovery_conf(target)
+
+    def cancel(self, mode: CancelMode) -> None:
+        self._recovery_service().cancel(mode)
+
+    def reset_cancel(self) -> None:
+        self._recovery_service().reset_cancel()
+
+    def _recovery_service(self) -> 'PostgresRecovery':
+        if self._recovery is None:
+            raise RuntimeError('recovery service is not configured')
+
+        return self._recovery
 
     def _collect(self, detail: SnapshotDetail, context: ObservationContext,
                  query_mode: QueryMode, attempts: int) -> NodeSnapshot:

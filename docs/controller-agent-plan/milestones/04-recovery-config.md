@@ -1,5 +1,20 @@
 # M04: Recovery and configuration
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/recovery.py`,
+`patroni/control/journal.py`, `patroni/control/commands.py`,
+`patroni/control/postgres_commands.py`, `patroni/control/node.py`,
+`patroni/ha.py`, `tests/test_control_recovery.py`, and
+`tests/test_control_journal.py`.
+
+Bootstrap, clone, rewind, crash recovery, reinitialize, PGDATA cleanup,
+configuration application, checkpoints, and callbacks now use typed agent
+commands. Recovery targets contain no credentials or paths. The agent merges
+local credentials and bootstrap configuration, excluding DCS configuration.
+The bounded terminal-result journal stores request hashes and public outcomes
+only. Existing HA and recovery tests retain monolithic ordering and outcomes.
+
 ## Goal
 
 Move destructive and filesystem-sensitive workflows into the agent.

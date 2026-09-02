@@ -8,9 +8,10 @@ from patroni.dcs import Member, RemoteMember
 from patroni.postgresql.misc import PostgresqlRole
 from patroni.postgresql.postmaster import PostmasterProcess
 
-from .commands import CheckpointMode, CommandDriver, CommandValue, DriverResult, EventChannel, \
-    EventKind, FollowTarget, LifecycleCommand, ReloadMode, SlotMode, StopMode, TargetKind
+from .commands import CheckpointMode, CommandDriver, CommandValue, DivergencePolicy, DriverResult, \
+    EventChannel, EventKind, FollowTarget, LifecycleCommand, ReloadMode, SlotMode, StopMode, TargetKind
 from .models import CommandKind, DesiredRole
+from .recovery import PostgresRecovery
 
 if TYPE_CHECKING:  # pragma: no cover
     from patroni.postgresql import Postgresql
@@ -22,8 +23,9 @@ DEFAULT_EVENT_TIMEOUT = 30.0
 class PostgresCommandDriver(CommandDriver):
     """Translate typed lifecycle commands into PostgreSQL operations."""
 
-    def __init__(self, postgresql: 'Postgresql') -> None:
+    def __init__(self, postgresql: 'Postgresql', recovery: Optional[PostgresRecovery] = None) -> None:
         self._postgresql = postgresql
+        self._recovery = recovery or PostgresRecovery(postgresql, lambda: None)
         self._lock = RLock()
         self._task: Optional[CriticalTask] = None
         self._checkpoint_location: Optional[int] = None
@@ -76,6 +78,7 @@ class PostgresCommandDriver(CommandDriver):
                 after_start=after_start,
             )
         if command.kind == CommandKind.PROMOTE:
+            self._recovery.reset()
             before_promote = self._callback(command, events, cancelled, EventKind.BEFORE_PROMOTE)
             return self._postgresql.promote(int(command.timeout or 0), task, before_promote)
         if command.kind == CommandKind.STOP:
@@ -92,8 +95,66 @@ class PostgresCommandDriver(CommandDriver):
         if command.kind == CommandKind.FENCE:
             timeout = int(command.timeout) if command.timeout is not None else None
             return self._postgresql.stop('immediate', checkpoint=False, stop_timeout=timeout)
+        if command.kind == CommandKind.BOOTSTRAP:
+            self._recovery.set_bootstrapping(command.bootstrap_state)
+            return self._recovery.bootstrap()
+        if command.kind == CommandKind.CLONE:
+            return self._clone(command)
+        if command.kind == CommandKind.REWIND:
+            if command.divergence != DivergencePolicy.REWIND or command.recovery_target is None:
+                raise ValueError('invalid rewind policy')
+            return self._recovery.execute(command.recovery_target)
+        if command.kind == CommandKind.CRASH_RECOVERY:
+            return self._recovery.clean_shutdown()
+        if command.kind == CommandKind.POST_BOOTSTRAP:
+            return self._recovery.post_bootstrap()
+        if command.kind == CommandKind.REINITIALIZE:
+            if command.divergence != DivergencePolicy.REINITIALIZE:
+                raise ValueError('invalid reinitialize policy')
+            self._postgresql.stop('immediate', stop_timeout=int(command.timeout or 0))
+            return self._clone(command)
+        if command.kind == CommandKind.APPLY_CONFIG:
+            self._recovery.apply_parameters()
+            return True
+        if command.kind == CommandKind.APPLY_SYNC:
+            self._recovery.refresh_sync_config()
+            return True
+        if command.kind == CommandKind.CALLBACK:
+            if command.callback is None:
+                raise ValueError('callback kind is required')
+            self._recovery.callback(command.callback)
+            return True
+        if command.kind == CommandKind.REMOVE_DATA:
+            self._recovery.remove_data()
+            return True
+        if command.kind == CommandKind.MOVE_DATA:
+            self._recovery.move_data()
+            return True
+        if command.kind == CommandKind.SET_BOOTSTRAP:
+            self._recovery.set_bootstrapping(command.bootstrap_state)
+            return True
+        if command.kind == CommandKind.RESET_RECOVERY:
+            self._recovery.reset()
+            return True
+        if command.kind == CommandKind.CHECK_DIVERGENCE:
+            self._recovery.trigger()
+            return True
+        if command.kind == CommandKind.CHECKPOINT:
+            self._recovery.ensure_checkpoint()
+            return True
+        if command.kind == CommandKind.ARCHIVE_WAL:
+            self._recovery.archive_shutdown()
+            return True
 
         raise ValueError('unsupported lifecycle command')
+
+    def _clone(self, command: LifecycleCommand) -> bool:
+        self._recovery.reset()
+        result = self._recovery.clone(command.recovery_target, command.clone_mode)
+        if not result:
+            self._recovery.remove_data()
+
+        return result
 
     def _stop(self, command: LifecycleCommand, events: EventChannel,
               cancelled: Event) -> bool:

@@ -57,11 +57,22 @@ monotonic sequence numbers and explicit acknowledgement.
 - `PROMOTE`
 - `FOLLOW`
 - `BOOTSTRAP`
+- `CLONE`
+- `REWIND`
+- `CRASH_RECOVERY`
+- `POST_BOOTSTRAP`
 - `REINITIALIZE`
 - `APPLY_CONFIG`
+- `CALLBACK`
+- `REMOVE_DATA`
+- `MOVE_DATA`
+- `SET_BOOTSTRAP`
+- `RESET_RECOVERY`
+- `CHECK_DIVERGENCE`
 - `APPLY_SYNC`
 - `APPLY_SLOTS`
 - `CHECKPOINT`
+- `ARCHIVE_WAL`
 - `FENCE`
 
 New command parameters use enums instead of booleans. Targets contain public
