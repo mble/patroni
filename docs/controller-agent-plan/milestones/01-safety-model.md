@@ -1,5 +1,15 @@
 # M01: Models and safety state machine
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/models.py`, `patroni/control/safety.py`, and
+`tests/test_control.py`.
+
+The state machine is pure. It returns `RUN`, `REJECT`, or `FENCE`; a later
+driver layer performs I/O. Thirty-one focused tests cover every command kind,
+authority and policy expiry, all command phases, idempotency, ordering, bounds,
+and active versus paused loss.
+
 ## Goal
 
 Prove the primary-authority invariant without real I/O.

@@ -56,7 +56,7 @@ etcd v2, and qualification of other DCS implementations.
 | ID | Slice |
 |---|---|
 | [M00](milestones/00-baseline-adr.md) | Complete: baseline and ADR |
-| [M01](milestones/01-safety-model.md) | Models and safety state machine |
+| [M01](milestones/01-safety-model.md) | Complete: models and safety state machine |
 | [M02](milestones/02-observations.md) | Coherent observations |
 | [M03](milestones/03-lifecycle.md) | Lifecycle commands |
 | [M04](milestones/04-recovery-config.md) | Recovery and configuration |
