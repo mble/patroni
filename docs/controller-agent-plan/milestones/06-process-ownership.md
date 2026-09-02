@@ -1,5 +1,20 @@
 # M06: Process supervision
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/agent.py`, `patroni/agent_supervisor.py`,
+`patroni/control/authority.py`, `tests/test_agent.py`, and
+`tests/test_control_authority.py`.
+
+`patroni-agent` constructs PostgreSQL, recovery, replication, commands, and
+watchdog services without constructing a DCS client. It rejects top-level DCS
+configuration. The PID-1 supervisor forwards signals, reaps adopted children,
+and exits with the agent without respawning it. PostgreSQL still launches via
+the existing orphaning helper and is rediscovered through `postmaster.pid` and
+`psutil`. Active fallback shutdown stops PostgreSQL through `NodeControl`;
+paused shutdown preserves it. Authority checks run on a separate thread ready
+for the M07 transport binding.
+
 ## Goal
 
 Retain Patroni's postmaster orphan and adoption semantics while making the agent
