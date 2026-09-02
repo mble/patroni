@@ -17,6 +17,10 @@ Existing HA, DCS, REST, callback, bootstrap, pause, watchdog, and shutdown
 semantics are authoritative. Any unavoidable difference requires a separate,
 approved compatibility decision.
 
+The accepted decision is [ADR 0001](adr/0001-controller-agent-split.md).
+[M00 evidence](m00/baseline.md), the [parity matrix](m00/semantic-parity.md),
+and the [trace contract](m00/trace-contract.md) freeze the starting point.
+
 ## Invariants
 
 1. Outside paused mode, PostgreSQL may be primary only under current leader,
@@ -51,7 +55,7 @@ etcd v2, and qualification of other DCS implementations.
 
 | ID | Slice |
 |---|---|
-| [M00](milestones/00-baseline-adr.md) | Baseline and ADR |
+| [M00](milestones/00-baseline-adr.md) | Complete: baseline and ADR |
 | [M01](milestones/01-safety-model.md) | Models and safety state machine |
 | [M02](milestones/02-observations.md) | Coherent observations |
 | [M03](milestones/03-lifecycle.md) | Lifecycle commands |
@@ -68,4 +72,4 @@ performance review before merge. Remediation repeats affected reviews.
 
 ## Branch
 
-Create `controller-agent` from `5f2c94c8` when implementation begins.
+`controller-agent` was created from `5f2c94c8`.

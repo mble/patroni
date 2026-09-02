@@ -1,5 +1,12 @@
 # M00: Baseline and ADR
 
+Status: complete, 2026-09-02
+
+Evidence: [ADR 0001](../adr/0001-controller-agent-split.md),
+[baseline](../m00/baseline.md), [semantic parity](../m00/semantic-parity.md),
+[trace contract](../m00/trace-contract.md), and
+[security boundary](../m00/security-boundary.md).
+
 ## Goal
 
 Freeze decisions and establish reproducible behaviour before refactoring.
