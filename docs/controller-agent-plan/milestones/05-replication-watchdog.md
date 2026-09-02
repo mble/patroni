@@ -1,5 +1,20 @@
 # M05: Replication and watchdog
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/replication.py`,
+`patroni/control/models.py`, `patroni/control/commands.py`,
+`patroni/control/node.py`, `patroni/control/postgres_commands.py`,
+`patroni/postgresql/slots.py`, `patroni/ha.py`,
+`tests/test_control_replication.py`, and existing sync, slot, quorum, HA,
+watchdog, and safety suites.
+
+The controller computes bounded sync and slot plans from DCS state. The agent
+applies local PostgreSQL mechanics, adds local credentials, and returns bounded
+slot-copy names. Watchdog activation, keepalive, disable, and ordered timing
+reloads use `NodeControl`; keepalive bypasses the long-command worker. The full
+non-Raft suite passes with 782 tests.
+
 ## Goal
 
 Separate controller replication policy from agent-local mechanics and fencing.

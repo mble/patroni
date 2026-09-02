@@ -128,6 +128,7 @@ class TestSafetyState(unittest.TestCase):
             CommandKind.ARCHIVE_WAL: (DesiredRole.UNCHANGED, SafetyAction.RUN),
             CommandKind.APPLY_SYNC: (DesiredRole.UNCHANGED, SafetyAction.RUN),
             CommandKind.APPLY_SLOTS: (DesiredRole.UNCHANGED, SafetyAction.RUN),
+            CommandKind.COPY_SLOTS: (DesiredRole.UNCHANGED, SafetyAction.RUN),
             CommandKind.CHECKPOINT: (DesiredRole.UNCHANGED, SafetyAction.RUN),
             CommandKind.FENCE: (DesiredRole.UNCHANGED, SafetyAction.FENCE),
         }

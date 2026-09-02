@@ -25,9 +25,9 @@ class FakeDriver(CommandDriver):
         events.publish(EventKind.SHUTDOWN, 20, 10)
         self.release.wait(1)
         if cancelled.is_set():
-            return DriverResult(CommandValue.FALSE, 20, 10)
+            return DriverResult(CommandValue.FALSE, 20, 10, ())
 
-        return DriverResult(CommandValue.TRUE, 20, 10)
+        return DriverResult(CommandValue.TRUE, 20, 10, ())
 
     def cancel(self) -> None:
         self.cancelled.set()
@@ -50,6 +50,8 @@ def command(command_id=None, kind=CommandKind.STOP):
         DivergencePolicy.NONE,
         None,
         BootstrapState.IDLE,
+        None,
+        None,
     )
 
 
@@ -148,6 +150,8 @@ class TestAgentCommands(unittest.TestCase):
             'not-a-uuid', CommandKind.STOP, DesiredRole.UNCHANGED, None,
             StopMode.FAST, CheckpointMode.DEFAULT, (), None, ReloadMode.RESTART,
             None, CloneMode.CONFIGURED, DivergencePolicy.NONE, None, BootstrapState.IDLE,
+            None,
+            None,
         )
 
         with self.assertRaises(ValueError):
@@ -168,7 +172,7 @@ class TestAgentCommands(unittest.TestCase):
             self.commands.submit(request)
 
     def test_result_repr_has_no_exception_detail(self) -> None:
-        result = CommandResult(command(), CommandState.FAILED, CommandValue.NONE, None, None)
+        result = CommandResult(command(), CommandState.FAILED, CommandValue.NONE, None, None, ())
 
         self.assertNotIn('password', repr(result))
 

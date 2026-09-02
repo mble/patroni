@@ -1,6 +1,6 @@
 """Local PostgreSQL observation driver."""
 from collections.abc import Mapping as MappingABC
-from typing import Any, cast, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, cast, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from patroni.exceptions import PostgresConnectionException
 from patroni.psycopg import Error
@@ -116,6 +116,9 @@ class LocalPostgresObserver(PostgresObserver):
 
     def server_version(self) -> int:
         return self._postgresql.server_version
+
+    def slots(self) -> Dict[str, int]:
+        return self._postgresql.slots()
 
     def _query(self, statement: str) -> List[Tuple[object, ...]]:
         """Prefer REST connection and retain heartbeat fallback semantics."""

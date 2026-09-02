@@ -22,7 +22,7 @@ def command(kind, role=DesiredRole.UNCHANGED, timeout=1.0,
     events = (EventKind.SAFEPOINT, EventKind.BEFORE_SHUTDOWN, EventKind.SHUTDOWN)
     return LifecycleCommand(
         str(uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode,
-        recovery_target, clone_mode, divergence, callback, bootstrap_state,
+        recovery_target, clone_mode, divergence, callback, bootstrap_state, None, None,
     )
 
 
@@ -64,7 +64,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
             channel.ack(sequence)
 
         thread.join(1)
-        self.assertEqual([DriverResult(CommandValue.TRUE, 20, 10)], result)
+        self.assertEqual([DriverResult(CommandValue.TRUE, 20, 10, ())], result)
         self.postgresql.stop.assert_called_once()
         self.assertEqual('fast', self.postgresql.stop.call_args.args[0])
         self.assertNotIn('checkpoint', self.postgresql.stop.call_args.kwargs)
@@ -79,7 +79,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.TRUE, 20, 10), value)
+        self.assertEqual(DriverResult(CommandValue.TRUE, 20, 10, ()), value)
 
     def test_start_preserves_pending_result(self) -> None:
         self.postgresql.start.return_value = None
@@ -87,7 +87,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.PENDING, None, None), value)
+        self.assertEqual(DriverResult(CommandValue.PENDING, None, None, ()), value)
         self.assertEqual(PostgresqlRole.PRIMARY, self.postgresql.start.call_args.kwargs['role'])
 
     def test_cancel_reaches_postgresql(self) -> None:
@@ -125,7 +125,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), value)
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None, ()), value)
         self.postgresql.stop.assert_called_once_with('immediate', checkpoint=False, stop_timeout=1)
 
     def test_follow_uses_credential_free_target(self) -> None:
@@ -135,7 +135,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), value)
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None, ()), value)
         member = self.postgresql.follow.call_args.args[0]
         self.assertEqual({'host': '127.0.0.1', 'port': '5432', 'dbname': 'postgres'},
                          member.data['conn_kwargs'])
@@ -159,7 +159,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         result = driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), result)
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None, ()), result)
         recovery.execute.assert_called_once_with(target)
         self.assertNotIn('password', repr(request))
 
@@ -171,7 +171,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         result = driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.FALSE, None, None), result)
+        self.assertEqual(DriverResult(CommandValue.FALSE, None, None, ()), result)
         recovery.remove_data.assert_called_once_with()
 
     def test_callback_is_allowlisted(self) -> None:
@@ -181,7 +181,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
 
         result = driver.run(request, EventChannel(request.command_id), self.cancelled)
 
-        self.assertEqual(DriverResult(CommandValue.TRUE, None, None), result)
+        self.assertEqual(DriverResult(CommandValue.TRUE, None, None, ()), result)
         recovery.callback.assert_called_once_with(CallbackKind.START)
 
     def test_bootstrap_sets_running_state_first(self) -> None:

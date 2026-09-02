@@ -87,6 +87,9 @@ class FakeObserver(PostgresObserver):
     def server_version(self):
         return 180006
 
+    def slots(self):
+        return {}
+
 
 def local(state=PostgresState.RUNNING, role=PostgresRole.PRIMARY,
           pending_restart=()):

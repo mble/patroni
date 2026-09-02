@@ -9,7 +9,7 @@ from uuid import uuid4
 from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, \
     CommandDriver, CommandKind, CommandResult, CommandState, CommandValue, DesiredRole, \
     DivergencePolicy, DriverResult, LifecycleCommand, ReloadMode, StopMode, SubmitState
-from patroni.control.journal import CommandJournal, JournalError
+from patroni.control.journal import CommandJournal, JOURNAL_VERSION, JournalError
 
 
 class ImmediateDriver(CommandDriver):
@@ -19,7 +19,7 @@ class ImmediateDriver(CommandDriver):
 
     def run(self, command, events, cancelled):
         self.calls += 1
-        return DriverResult(CommandValue.TRUE, None, None)
+        return DriverResult(CommandValue.TRUE, None, None, ())
 
     def cancel(self) -> None:
         pass
@@ -30,6 +30,8 @@ def command(command_id=None):
         command_id or str(uuid4()), CommandKind.STOP, DesiredRole.UNCHANGED, 10,
         StopMode.FAST, CheckpointMode.DISABLED, (), None, ReloadMode.RESTART,
         None, CloneMode.CONFIGURED, DivergencePolicy.NONE, None, BootstrapState.IDLE,
+        None,
+        None,
     )
 
 
@@ -44,7 +46,7 @@ class TestCommandJournal(unittest.TestCase):
 
     def test_terminal_result_survives_restart(self) -> None:
         request = command()
-        result = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, 20, 10)
+        result = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, 20, 10, ('logical_a',))
         journal = CommandJournal(str(self.directory))
         journal.put(result)
 
@@ -57,7 +59,7 @@ class TestCommandJournal(unittest.TestCase):
     def test_conflicting_reuse_is_reported(self) -> None:
         request = command()
         journal = CommandJournal(str(self.directory))
-        journal.put(CommandResult(request, CommandState.FAILED, CommandValue.FALSE, None, None))
+        journal.put(CommandResult(request, CommandState.FAILED, CommandValue.FALSE, None, None, ()))
         conflict = request._replace(kind=CommandKind.START)
 
         with self.assertRaises(JournalError):
@@ -66,7 +68,7 @@ class TestCommandJournal(unittest.TestCase):
     def test_journal_contains_no_command_payload(self) -> None:
         request = command()
         CommandJournal(str(self.directory)).put(
-            CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None),
+            CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None, ()),
         )
 
         text = (self.directory / 'commands.json').read_text()
@@ -83,7 +85,8 @@ class TestCommandJournal(unittest.TestCase):
             CommandJournal(str(self.directory))
 
     def test_incompatible_version_fails_closed(self) -> None:
-        (self.directory / 'commands.json').write_text(json.dumps({'version': 2, 'entries': []}))
+        document = {'version': JOURNAL_VERSION + 1, 'entries': []}
+        (self.directory / 'commands.json').write_text(json.dumps(document))
         os.chmod(self.directory / 'commands.json', 0o600)
 
         with self.assertRaises(JournalError):

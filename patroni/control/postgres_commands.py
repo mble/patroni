@@ -14,6 +14,9 @@ from .models import CommandKind, DesiredRole
 from .recovery import PostgresRecovery
 
 if TYPE_CHECKING:  # pragma: no cover
+    from .replication import PostgresReplication
+
+if TYPE_CHECKING:  # pragma: no cover
     from patroni.postgresql import Postgresql
 
 
@@ -23,13 +26,16 @@ DEFAULT_EVENT_TIMEOUT = 30.0
 class PostgresCommandDriver(CommandDriver):
     """Translate typed lifecycle commands into PostgreSQL operations."""
 
-    def __init__(self, postgresql: 'Postgresql', recovery: Optional[PostgresRecovery] = None) -> None:
+    def __init__(self, postgresql: 'Postgresql', recovery: Optional[PostgresRecovery] = None,
+                 replication: Optional['PostgresReplication'] = None) -> None:
         self._postgresql = postgresql
         self._recovery = recovery or PostgresRecovery(postgresql, lambda: None)
+        self._replication = replication
         self._lock = RLock()
         self._task: Optional[CriticalTask] = None
         self._checkpoint_location: Optional[int] = None
         self._previous_location: Optional[int] = None
+        self._output = ()
 
     def run(self, command: LifecycleCommand, events: EventChannel,
             cancelled: Event) -> DriverResult:
@@ -38,12 +44,13 @@ class PostgresCommandDriver(CommandDriver):
             self._task = task
             self._checkpoint_location = None
             self._previous_location = None
+            self._output = ()
 
         self._postgresql.cancellable.reset_is_cancelled()
         try:
             value = self._dispatch(command, events, cancelled, task)
             with self._lock:
-                return DriverResult(_value(value), self._checkpoint_location, self._previous_location)
+                return DriverResult(_value(value), self._checkpoint_location, self._previous_location, self._output)
         finally:
             with self._lock:
                 self._task = None
@@ -117,7 +124,14 @@ class PostgresCommandDriver(CommandDriver):
             self._recovery.apply_parameters()
             return True
         if command.kind == CommandKind.APPLY_SYNC:
-            self._recovery.refresh_sync_config()
+            if command.sync_plan is None or self._replication is None:
+                raise ValueError('sync plan is required')
+            self._replication.apply_sync(command.sync_plan)
+            return True
+        if command.kind in (CommandKind.APPLY_SLOTS, CommandKind.COPY_SLOTS):
+            if command.slot_plan is None or self._replication is None:
+                raise ValueError('slot plan is required')
+            self._output = self._replication.apply_slots(command.slot_plan)
             return True
         if command.kind == CommandKind.CALLBACK:
             if command.callback is None:

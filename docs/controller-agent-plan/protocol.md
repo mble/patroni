@@ -71,6 +71,7 @@ monotonic sequence numbers and explicit acknowledgement.
 - `CHECK_DIVERGENCE`
 - `APPLY_SYNC`
 - `APPLY_SLOTS`
+- `COPY_SLOTS`
 - `CHECKPOINT`
 - `ARCHIVE_WAL`
 - `FENCE`

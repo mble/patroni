@@ -53,6 +53,7 @@ class CommandKind(str, Enum):
     ARCHIVE_WAL = 'archive_wal'
     APPLY_SYNC = 'apply_sync'
     APPLY_SLOTS = 'apply_slots'
+    COPY_SLOTS = 'copy_slots'
     CHECKPOINT = 'checkpoint'
     FENCE = 'fence'
 
@@ -174,6 +175,135 @@ class ConfigChange(NamedTuple):
 
     change_required: bool
     restart_required: bool
+
+
+class WatchdogSnapshot(NamedTuple):
+    """Agent-local watchdog health."""
+
+    running: bool
+    healthy: bool
+
+
+class WatchdogMode(str, Enum):
+    """Normalized Patroni watchdog mode."""
+
+    OFF = 'off'
+    AUTOMATIC = 'automatic'
+    REQUIRED = 'required'
+
+
+class WatchdogReload(str, Enum):
+    """Result of applying versioned watchdog timing."""
+
+    APPLIED = 'applied'
+    REPLAYED = 'replayed'
+
+
+class WatchdogTiming(NamedTuple):
+    """Controller-owned fencing timing."""
+
+    revision: int
+    ttl: int
+    loop_wait: int
+    safety_margin: int
+    mode: WatchdogMode
+
+
+class SyncType(str, Enum):
+    """PostgreSQL synchronous replication mode."""
+
+    OFF = 'off'
+    PRIORITY = 'priority'
+    QUORUM = 'quorum'
+
+
+class SyncMember(NamedTuple):
+    """Public member facts used for synchronous selection."""
+
+    name: str
+    running: bool
+    nofailover: bool
+    nosync: bool
+    replicatefrom: Optional[str]
+    sync_priority: int
+
+
+class SyncContext(NamedTuple):
+    """Bounded DCS facts used by the agent sync observer."""
+
+    leader: Optional[str]
+    voters: Tuple[str, ...]
+    quorum: int
+    members: Tuple[SyncMember, ...]
+
+
+class SyncSnapshot(NamedTuple):
+    """Agent-observed synchronous replication state."""
+
+    sync_type: SyncType
+    numsync: int
+    sync: Tuple[str, ...]
+    confirmed: Tuple[str, ...]
+    active: Tuple[str, ...]
+    configured: str
+
+
+class SlotKind(str, Enum):
+    """PostgreSQL replication slot type."""
+
+    PHYSICAL = 'physical'
+    LOGICAL = 'logical'
+
+
+class SlotCapabilities(NamedTuple):
+    """Local facts needed by controller slot policy."""
+
+    name: str
+    can_advance: bool
+
+
+class SlotTags(NamedTuple):
+    """Tags affecting replication-slot topology."""
+
+    nofailover: bool
+    nostream: bool
+    replicatefrom: Optional[str]
+
+
+class SlotMember(NamedTuple):
+    """Credential-free member facts needed by slot mechanics."""
+
+    name: str
+    host: Optional[str]
+    port: Optional[str]
+    database: Optional[str]
+    running: bool
+    lsn: Optional[int]
+    tags: SlotTags
+
+
+class SlotContext(NamedTuple):
+    """Bounded cluster facts needed to apply a slot plan."""
+
+    local_name: str
+    config_present: bool
+    leader: Optional[str]
+    members: Tuple[SlotMember, ...]
+    status_slots: Tuple[Tuple[str, int], ...]
+    retain_slots: Tuple[str, ...]
+    local_tags: SlotTags
+
+
+class SlotSpec(NamedTuple):
+    """One desired replication slot."""
+
+    name: str
+    kind: SlotKind
+    database: Optional[str]
+    plugin: Optional[str]
+    lsn: Optional[int]
+    expected_active: Optional[bool]
+    failover: Optional[bool]
 
 
 class SafetyAction(str, Enum):

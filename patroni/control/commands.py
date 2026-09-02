@@ -1,5 +1,6 @@
 """Asynchronous, idempotent agent command execution."""
 import math
+import re
 import time
 
 from abc import ABC, abstractmethod
@@ -9,7 +10,7 @@ from threading import Condition, Event, RLock, Thread
 from typing import cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
-from .models import CommandKind, CommandState, DesiredRole
+from .models import CommandKind, CommandState, DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, SlotTags
 
 if TYPE_CHECKING:  # pragma: no cover
     from .journal import CommandJournal
@@ -17,6 +18,8 @@ if TYPE_CHECKING:  # pragma: no cover
 MAX_COMMAND_HISTORY = 4096
 MAX_COMMAND_EVENTS = 128
 MAX_TARGET_TEXT = 4096
+MAX_SLOT_NAME = 63
+SLOT_NAME_RE = re.compile(r'^[a-z0-9_]{1,' + str(MAX_SLOT_NAME) + r'}$')
 AGENT_KINDS = frozenset((
     CommandKind.START,
     CommandKind.STOP,
@@ -33,6 +36,7 @@ AGENT_KINDS = frozenset((
     CommandKind.APPLY_CONFIG,
     CommandKind.APPLY_SYNC,
     CommandKind.APPLY_SLOTS,
+    CommandKind.COPY_SLOTS,
     CommandKind.CALLBACK,
     CommandKind.REMOVE_DATA,
     CommandKind.MOVE_DATA,
@@ -102,6 +106,45 @@ class DivergencePolicy(str, Enum):
     NONE = 'none'
     REWIND = 'rewind'
     REINITIALIZE = 'reinitialize'
+
+
+class SyncAction(str, Enum):
+    """Synchronous configuration operation."""
+
+    REFRESH = 'refresh'
+    SET = 'set'
+
+
+class SyncCount(str, Enum):
+    """Whether to pass an explicit synchronous count."""
+
+    DEFAULT = 'default'
+    EXPLICIT = 'explicit'
+
+
+class SyncPlan(NamedTuple):
+    """Bounded synchronous standby configuration."""
+
+    action: SyncAction
+    members: Tuple[str, ...]
+    count_mode: SyncCount
+    numsync: Optional[int]
+
+
+class SlotAction(str, Enum):
+    """Replication-slot operation."""
+
+    APPLY = 'apply'
+    COPY = 'copy'
+
+
+class SlotPlan(NamedTuple):
+    """Controller-computed replication-slot operation."""
+
+    action: SlotAction
+    context: SlotContext
+    slots: Tuple[SlotSpec, ...]
+    copy_slots: Tuple[str, ...]
 
 
 class TargetKind(str, Enum):
@@ -197,6 +240,8 @@ class LifecycleCommand(NamedTuple):
     divergence: DivergencePolicy
     callback: Optional[CallbackKind]
     bootstrap_state: BootstrapState
+    sync_plan: Optional[SyncPlan]
+    slot_plan: Optional[SlotPlan]
 
 
 class DriverResult(NamedTuple):
@@ -205,6 +250,7 @@ class DriverResult(NamedTuple):
     value: CommandValue
     checkpoint_location: Optional[int]
     previous_location: Optional[int]
+    output: Tuple[str, ...]
 
 
 class CommandResult(NamedTuple):
@@ -215,6 +261,7 @@ class CommandResult(NamedTuple):
     value: CommandValue
     checkpoint_location: Optional[int]
     previous_location: Optional[int]
+    output: Tuple[str, ...]
 
 
 class CommandSubmission(NamedTuple):
@@ -366,7 +413,7 @@ class AgentCommands:
             if self._closed.is_set():
                 return CommandSubmission(SubmitState.BUSY, None)
 
-            result = CommandResult(command, CommandState.RUNNING, CommandValue.NONE, None, None)
+            result = CommandResult(command, CommandState.RUNNING, CommandValue.NONE, None, None, ())
             entry = _Entry(result)
             self._entries[command.command_id] = entry
             self._active = command.command_id
@@ -408,7 +455,9 @@ class AgentCommands:
                 return entry.result
 
             entry.cancelled.set()
-            entry.result = CommandResult(entry.result.request, CommandState.CANCELLED, CommandValue.NONE, None, None)
+            entry.result = CommandResult(
+                entry.result.request, CommandState.CANCELLED, CommandValue.NONE, None, None, (),
+            )
 
         self._driver.cancel()
         return entry.result
@@ -438,9 +487,10 @@ class AgentCommands:
     def _run(self, entry: _Entry) -> None:
         try:
             driver_result = self._driver.run(entry.result.request, entry.events, entry.cancelled)
+            _driver_result(driver_result)
             state = CommandState.SUCCEEDED if driver_result.value != CommandValue.FALSE else CommandState.FAILED
         except Exception:
-            driver_result = DriverResult(CommandValue.NONE, None, None)
+            driver_result = DriverResult(CommandValue.NONE, None, None, ())
             state = CommandState.FAILED
 
         with self._lock:
@@ -452,13 +502,14 @@ class AgentCommands:
                 driver_result.value,
                 driver_result.checkpoint_location,
                 driver_result.previous_location,
+                driver_result.output,
             )
             if self._journal:
                 try:
                     self._journal.put(entry.result)
                 except Exception:
                     entry.result = CommandResult(
-                        entry.result.request, CommandState.FAILED, CommandValue.NONE, None, None,
+                        entry.result.request, CommandState.FAILED, CommandValue.NONE, None, None, (),
                     )
                     self._closed.set()
             entry.done.set()
@@ -500,6 +551,8 @@ def _command(value: object) -> None:
         raise ValueError('invalid callback')
     if not isinstance(cast(object, value.bootstrap_state), BootstrapState):
         raise ValueError('invalid bootstrap state')
+    _sync_plan(value.sync_plan)
+    _slot_plan(value.slot_plan)
     if value.follow_target is not None and value.kind != CommandKind.FOLLOW:
         raise ValueError('follow target is not allowed')
     recovery_kinds = (CommandKind.CLONE, CommandKind.REWIND, CommandKind.REINITIALIZE)
@@ -519,6 +572,14 @@ def _command(value: object) -> None:
         raise ValueError('callback is not allowed')
     if value.kind == CommandKind.CALLBACK and value.callback is None:
         raise ValueError('callback is required')
+    if value.sync_plan is not None and value.kind != CommandKind.APPLY_SYNC:
+        raise ValueError('sync plan is not allowed')
+    slot_kind = CommandKind.APPLY_SLOTS if value.slot_plan and value.slot_plan.action == SlotAction.APPLY \
+        else CommandKind.COPY_SLOTS
+    if value.slot_plan is not None and value.kind != slot_kind:
+        raise ValueError('slot plan is not allowed')
+    if value.kind in (CommandKind.APPLY_SLOTS, CommandKind.COPY_SLOTS) and value.slot_plan is None:
+        raise ValueError('slot plan is required')
     _timeout(value.timeout)
 
 
@@ -540,6 +601,18 @@ def _timeout(value: object) -> None:
 def _location(value: object) -> None:
     if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
         raise ValueError('invalid WAL location')
+
+
+def _driver_result(value: object) -> None:
+    if not isinstance(value, DriverResult) or not isinstance(cast(object, value.value), CommandValue):
+        raise ValueError('invalid driver result')
+    _location(value.checkpoint_location)
+    _location(value.previous_location)
+    if len(value.output) > MAX_COMMAND_HISTORY:
+        raise ValueError('driver output exceeds limit')
+    for item in value.output:
+        raw_item = cast(object, item)
+        _slot_name(raw_item)
 
 
 def _target(value: object) -> None:
@@ -581,3 +654,100 @@ def _recovery_target(value: object) -> None:
     checkpoint = cast(object, value.checkpoint_after_promote)
     if checkpoint is not None and not isinstance(checkpoint, bool):
         raise ValueError('invalid recovery checkpoint state')
+
+
+def _sync_plan(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, SyncPlan) or not isinstance(cast(object, value.action), SyncAction) \
+            or not isinstance(cast(object, value.count_mode), SyncCount):
+        raise ValueError('invalid sync plan')
+    if len(value.members) > MAX_COMMAND_HISTORY or len(set(name.lower() for name in value.members)) \
+            != len(value.members):
+        raise ValueError('invalid sync members')
+    for name in value.members:
+        raw_name = cast(object, name)
+        if not isinstance(raw_name, str) or not raw_name \
+                or len(raw_name) > MAX_TARGET_TEXT or '\x00' in raw_name:
+            raise ValueError('invalid sync member')
+    raw_numsync = cast(object, value.numsync)
+    if raw_numsync is not None and (not isinstance(raw_numsync, int)
+                                    or isinstance(raw_numsync, bool) or raw_numsync < 0):
+        raise ValueError('invalid synchronous node count')
+    if value.action == SyncAction.REFRESH and (value.members or value.count_mode != SyncCount.DEFAULT
+                                               or value.numsync is not None):
+        raise ValueError('invalid sync refresh plan')
+    if value.count_mode == SyncCount.DEFAULT and value.numsync is not None:
+        raise ValueError('unexpected synchronous node count')
+
+
+def _slot_plan(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, SlotPlan) or not isinstance(cast(object, value.action), SlotAction) \
+            or not isinstance(cast(object, value.context), SlotContext):
+        raise ValueError('invalid slot plan')
+    if len(value.slots) > MAX_COMMAND_HISTORY or len(value.copy_slots) > MAX_COMMAND_HISTORY \
+            or len(value.context.members) > MAX_COMMAND_HISTORY:
+        raise ValueError('slot plan exceeds limit')
+    _text(value.context.local_name, 'local member')
+    if not isinstance(cast(object, value.context.config_present), bool):
+        raise ValueError('invalid slot context')
+    if value.context.leader is not None:
+        _text(value.context.leader, 'slot leader')
+    if value.action == SlotAction.APPLY and value.copy_slots:
+        raise ValueError('apply plan contains copy slots')
+    _slot_tags(value.context.local_tags)
+    names: set[str] = set()
+    for member in value.context.members:
+        if not isinstance(cast(object, member), SlotMember):
+            raise ValueError('invalid slot member')
+        _text(member.name, 'slot member')
+        for text in (member.host, member.port, member.database):
+            if text is not None:
+                _text(text, 'slot endpoint')
+        _slot_tags(member.tags)
+        _location(member.lsn)
+    for spec in value.slots:
+        if not isinstance(cast(object, spec), SlotSpec) or not isinstance(cast(object, spec.kind), SlotKind):
+            raise ValueError('invalid slot specification')
+        _slot_name(spec.name)
+        if spec.name in names:
+            raise ValueError('duplicate slot name')
+        names.add(spec.name)
+        for text in (spec.database, spec.plugin):
+            if text is not None:
+                _text(text, 'slot attribute')
+        _location(spec.lsn)
+        for flag in (spec.expected_active, spec.failover):
+            if flag is not None and not isinstance(cast(object, flag), bool):
+                raise ValueError('invalid slot flag')
+    for name in value.copy_slots:
+        _slot_name(name)
+        if name not in names:
+            raise ValueError('unknown copy slot')
+    for name, location in value.context.status_slots:
+        _slot_name(name)
+        _location(location)
+    for name in value.context.retain_slots:
+        _slot_name(name)
+
+
+def _slot_tags(value: object) -> None:
+    if not isinstance(value, SlotTags):
+        raise ValueError('invalid slot tags')
+    if not isinstance(cast(object, value.nofailover), bool) \
+            or not isinstance(cast(object, value.nostream), bool):
+        raise ValueError('invalid slot tags')
+    if value.replicatefrom is not None:
+        _text(value.replicatefrom, 'replication source')
+
+
+def _text(value: object, field: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > MAX_TARGET_TEXT or '\x00' in value:
+        raise ValueError('invalid {0}'.format(field))
+
+
+def _slot_name(value: object) -> None:
+    if not isinstance(value, str) or not SLOT_NAME_RE.fullmatch(value):
+        raise ValueError('invalid slot name')

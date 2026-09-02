@@ -8,11 +8,11 @@ from collections import OrderedDict
 from typing import Any, cast, Dict, List, NamedTuple, Optional, Tuple
 from uuid import UUID, uuid4
 
-from .commands import CommandResult, CommandValue, FollowTarget, LifecycleCommand, RecoveryTarget
+from .commands import CommandResult, CommandValue, FollowTarget, LifecycleCommand, RecoveryTarget, SlotPlan, SyncPlan
 from .models import CommandState
 
 JOURNAL_FILE = 'commands.json'
-JOURNAL_VERSION = 1
+JOURNAL_VERSION = 2
 MAX_JOURNAL_BYTES = 4 * 1024 * 1024
 MAX_JOURNAL_ENTRIES = 4096
 FINGERPRINT_LENGTH = 64
@@ -34,6 +34,7 @@ class _Stored(NamedTuple):
     value: CommandValue
     checkpoint_location: Optional[int]
     previous_location: Optional[int]
+    output: Tuple[str, ...]
 
 
 class CommandJournal:
@@ -59,6 +60,7 @@ class CommandJournal:
             stored.value,
             stored.checkpoint_location,
             stored.previous_location,
+            stored.output,
         )
 
     def put(self, result: CommandResult) -> None:
@@ -71,6 +73,7 @@ class CommandJournal:
             result.value,
             result.checkpoint_location,
             result.previous_location,
+            result.output,
         )
         self._entries.move_to_end(result.request.command_id)
         while len(self._entries) > MAX_JOURNAL_ENTRIES:
@@ -135,6 +138,7 @@ class CommandJournal:
                     'value': stored.value.value,
                     'checkpoint_location': stored.checkpoint_location,
                     'previous_location': stored.previous_location,
+                    'output': list(stored.output),
                 }
                 for command_id, stored in self._entries.items()
             ],
@@ -194,6 +198,7 @@ def _entry(value: object) -> Tuple[str, _Stored]:
         result_value = CommandValue(data.get('value'))
         checkpoint_location = _location(data.get('checkpoint_location'))
         previous_location = _location(data.get('previous_location'))
+        output = _output(data.get('output', []))
     except (TypeError, ValueError) as exc:
         raise JournalError('journal entry is invalid') from exc
     if not valid_id or not valid_fingerprint or state == CommandState.RUNNING:
@@ -207,6 +212,7 @@ def _entry(value: object) -> Tuple[str, _Stored]:
         result_value,
         checkpoint_location,
         previous_location,
+        output,
     )
 
 
@@ -216,6 +222,20 @@ def _location(value: object) -> Optional[int]:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise JournalError('journal WAL location is invalid')
     return value
+
+
+def _output(value: object) -> Tuple[str, ...]:
+    if not isinstance(value, list):
+        raise JournalError('journal output is invalid')
+    items = cast(List[object], value)
+    if len(items) > MAX_JOURNAL_ENTRIES:
+        raise JournalError('journal output is invalid')
+    output: List[str] = []
+    for item in items:
+        if not isinstance(item, str) or not item or len(item) > FINGERPRINT_LENGTH or '\x00' in item:
+            raise JournalError('journal output is invalid')
+        output.append(item)
+    return tuple(output)
 
 
 def _fingerprint(command: LifecycleCommand) -> str:
@@ -234,6 +254,8 @@ def _fingerprint(command: LifecycleCommand) -> str:
         command.divergence.value,
         command.callback.value if command.callback else None,
         command.bootstrap_state.value,
+        _sync_plan(command.sync_plan),
+        _slot_plan(command.slot_plan),
     ]
     payload = json.dumps(document, separators=(',', ':'), ensure_ascii=True).encode('utf-8')
     return hashlib.sha256(payload).hexdigest()
@@ -266,4 +288,29 @@ def _recovery_target(target: Optional[RecoveryTarget]) -> object:
         target.slot_mode.value,
         target.role,
         target.checkpoint_after_promote,
+    ]
+
+
+def _sync_plan(plan: Optional[SyncPlan]) -> object:
+    if plan is None:
+        return None
+    return [plan.action.value, list(plan.members), plan.count_mode.value, plan.numsync]
+
+
+def _slot_plan(plan: Optional[SlotPlan]) -> object:
+    if plan is None:
+        return None
+    context = plan.context
+    members = [
+        [member.name, member.host, member.port, member.database, member.running, member.lsn,
+         list(member.tags)]
+        for member in context.members
+    ]
+    slots = [list(slot) for slot in plan.slots]
+    return [
+        plan.action.value,
+        [context.local_name, context.config_present, context.leader, members, list(context.status_slots),
+         list(context.retain_slots), list(context.local_tags)],
+        slots,
+        list(plan.copy_slots),
     ]

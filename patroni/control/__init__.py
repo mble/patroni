@@ -1,14 +1,16 @@
 """Controller-agent domain boundary."""
-from .commands import AckState, AgentCommands, BootstrapState, CallbackKind, CancelMode, \
-    CheckpointMode, CloneMode, CommandDriver, CommandResult, CommandSubmission, CommandValue, \
-    DivergencePolicy, DriverResult, EventChannel, EventKind, EventRecord, FollowTarget, \
-    LifecycleCommand, RecoveryTarget, ReloadMode, SlotMode, StopMode, SubmitState, TargetKind
+from .commands import AckState, AgentCommands, BootstrapState, CallbackKind, CancelMode, CheckpointMode, \
+    CloneMode, CommandDriver, CommandResult, CommandSubmission, CommandValue, DivergencePolicy, DriverResult, \
+    EventChannel, EventKind, EventRecord, FollowTarget, LifecycleCommand, RecoveryTarget, ReloadMode, \
+    SlotAction, SlotMode, SlotPlan, StopMode, SubmitState, SyncAction, SyncCount, SyncPlan, TargetKind
 from .models import AgentState, AuthorityGrant, AuthorityKind, AuthorityState, CommandKind, CommandPhase, \
-    CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigChange, DesiredRole, Freshness, \
-    LocalPostgres, NodeSnapshot, ObservationContext, ObservationFailure, PendingRestart, PolicyMode, \
-    PostgresRole, PostgresState, QueryMode, RecoverySnapshot, ReplicationConnection, SafetyAction, \
-    SafetySnapshot, SnapshotDetail, TimelineWal, Timing, WalObservation
+    CommandReceipt, CommandRequest, CommandState, CommandStatus, ConfigChange, DesiredRole, Freshness, LocalPostgres, \
+    NodeSnapshot, ObservationContext, ObservationFailure, PendingRestart, PolicyMode, PostgresRole, PostgresState, \
+    QueryMode, RecoverySnapshot, ReplicationConnection, SafetyAction, SafetySnapshot, SlotCapabilities, SlotContext, \
+    SlotKind, SlotMember, SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, \
+    TimelineWal, Timing, WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 from .node import InProcessNodeControl, NodeControl
+from .replication import NodeWatchdog
 from .safety import SafetyState, ValidationError
 
 __all__ = [
@@ -47,6 +49,7 @@ __all__ = [
     'LocalPostgres',
     'NodeSnapshot',
     'NodeControl',
+    'NodeWatchdog',
     'ObservationContext',
     'ObservationFailure',
     'PendingRestart',
@@ -62,12 +65,31 @@ __all__ = [
     'SafetySnapshot',
     'SafetyState',
     'SnapshotDetail',
+    'SlotAction',
+    'SlotCapabilities',
+    'SlotContext',
+    'SlotKind',
+    'SlotMember',
     'SlotMode',
+    'SlotPlan',
+    'SlotSpec',
+    'SlotTags',
     'StopMode',
     'SubmitState',
+    'SyncAction',
+    'SyncContext',
+    'SyncCount',
+    'SyncMember',
+    'SyncPlan',
+    'SyncSnapshot',
+    'SyncType',
     'TargetKind',
     'TimelineWal',
     'Timing',
     'ValidationError',
     'WalObservation',
+    'WatchdogSnapshot',
+    'WatchdogMode',
+    'WatchdogReload',
+    'WatchdogTiming',
 ]

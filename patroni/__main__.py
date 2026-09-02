@@ -10,7 +10,7 @@ import sys
 import time
 
 from argparse import Namespace
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, cast, Dict, List, Optional, TYPE_CHECKING
 from uuid import uuid4
 
 from patroni import global_config, MIN_PSYCOPG2, MIN_PSYCOPG3, parse_version
@@ -61,6 +61,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         from patroni.control.postgres import LocalPostgresObserver
         from patroni.control.postgres_commands import PostgresCommandDriver
         from patroni.control.recovery import PostgresRecovery
+        from patroni.control.replication import PostgresReplication
         from patroni.dcs import get_dcs
         from patroni.ha import Ha
         from patroni.postgresql import Postgresql
@@ -87,6 +88,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         self.ensure_unique_name(cluster)
 
         self.watchdog = Watchdog(self.config)
+        self._watchdog_revision = 0
         self.apply_dynamic_configuration(cluster)
 
         # Initialize global config
@@ -94,9 +96,15 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
 
         self.postgresql = Postgresql(self.config['postgresql'], self.dcs.mpp)
         recovery = PostgresRecovery(self.postgresql, lambda: self.ha.wakeup(), self.config.get('bootstrap'))
-        commands = AgentCommands(PostgresCommandDriver(self.postgresql, recovery))
+        replication = PostgresReplication(
+            self.postgresql,
+            self.watchdog,
+            self._watchdog_revision,
+            lambda: self.config.get('watchdog') or {},
+        )
+        commands = AgentCommands(PostgresCommandDriver(self.postgresql, recovery, replication))
         self.node = InProcessNodeControl(
-            str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic, commands, recovery,
+            str(uuid4()), LocalPostgresObserver(self.postgresql), time.monotonic, commands, recovery, replication,
         )
         self.api = RestApiServer(self, self.config['restapi'])
         self.ha = Ha(self)
@@ -138,11 +146,11 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
         if cluster and cluster.config and cluster.config.data:
             if self.config.set_dynamic_configuration(cluster.config):
                 self.dcs.reload_config(self.config)
-                self.watchdog.reload_config(self.config)
+                self._reload_watchdog()
         elif not self.config.dynamic_configuration and 'bootstrap' in self.config:
             if self.config.set_dynamic_configuration(self.config['bootstrap']['dcs']):
                 self.dcs.reload_config(self.config)
-                self.watchdog.reload_config(self.config)
+                self._reload_watchdog()
 
     def ensure_unique_name(self, cluster: 'Cluster') -> None:
         """A helper method to prevent splitbrain from operator naming error.
@@ -197,7 +205,7 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
             received_new_cert = sighup and self.api.reload_local_certificate()
             if local or received_new_cert:
                 self.api.reload_config(self.config['restapi'])
-            self.watchdog.reload_config(self.config)
+            self._reload_watchdog()
             self._last_effective_role = ROLE_CONFIG_SUFFIX_MAP.get(self.postgresql.role)
             self._last_effective_pg_config = \
                 self.config.build_effective_postgresql_configuration(self.postgresql.role)
@@ -205,6 +213,35 @@ class Patroni(AbstractPatroniDaemon, ClusterSite, Tags):
             self.dcs.reload_config(self.config)
         except Exception:
             logger.exception('Failed to reload config_file=%s', self.config.config_file)
+
+    def _reload_watchdog(self) -> None:
+        from patroni.control import WatchdogMode, WatchdogTiming
+
+        raw_watchdog = cast(object, self.config.get('watchdog') or {})
+        watchdog = cast(Dict[str, Any], raw_watchdog) if isinstance(raw_watchdog, dict) else {}
+        raw_mode: object = watchdog.get('mode', WatchdogMode.AUTOMATIC.value)
+        if raw_mode is False:
+            mode = WatchdogMode.OFF
+        elif str(raw_mode).lower() in ('require', WatchdogMode.REQUIRED.value):
+            mode = WatchdogMode.REQUIRED
+        elif str(raw_mode).lower() in ('auto', WatchdogMode.AUTOMATIC.value):
+            mode = WatchdogMode.AUTOMATIC
+        else:
+            mode = WatchdogMode.OFF
+
+        revision = self._watchdog_revision + 1
+        timing = WatchdogTiming(
+            revision,
+            int(self.config['ttl']),
+            int(self.config['loop_wait']),
+            int(watchdog.get('safety_margin', 5)),
+            mode,
+        )
+        if hasattr(self, 'node'):
+            self.node.reload_watchdog(timing)
+        else:
+            self.watchdog.reload_config(self.config)
+        self._watchdog_revision = revision
 
     @property
     def tags(self) -> Dict[str, Any]:

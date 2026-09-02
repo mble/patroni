@@ -17,6 +17,7 @@ from patroni.control import AgentCommands, BootstrapState, CheckpointMode, Clone
 from patroni.control.postgres import LocalPostgresObserver
 from patroni.control.postgres_commands import PostgresCommandDriver
 from patroni.control.recovery import PostgresRecovery
+from patroni.control.replication import PostgresReplication
 from patroni.dcs import Cluster, ClusterConfig, Failover, get_dcs, \
     Leader, Member, RemoteMember, Status, SyncState, TimelineHistory
 from patroni.dcs.etcd import AbstractEtcdClientWithFailover
@@ -164,10 +165,13 @@ zookeeper:
         self.config = Config(None)
         self.version = '1.5.7'
         self.postgresql = p
+        self.watchdog = Watchdog(self.config)
         recovery = PostgresRecovery(p, lambda: None, self.config.get('bootstrap'))
-        commands = AgentCommands(PostgresCommandDriver(p, recovery))
+        replication = PostgresReplication(p, self.watchdog)
+        commands = AgentCommands(PostgresCommandDriver(p, recovery, replication))
         self.node = InProcessNodeControl(
-            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0, commands, recovery,
+            '96f13a0f-a275-4647-a812-1785ae01d378', LocalPostgresObserver(p), lambda: 1.0,
+            commands, recovery, replication,
         )
         self.dcs = d
         self.api = Mock()
@@ -180,7 +184,6 @@ zookeeper:
         self.nostream = False
         self.scheduled_restart = {'schedule': future_restart_time,
                                   'postmaster_start_time': str(postmaster_start_time)}
-        self.watchdog = Watchdog(self.config)
         self.request = lambda *args, **kwargs: requests_get(args[0].api_url, *args[1:], **kwargs)
         self.failover_priority = 1
         self.sync_priority = 1
@@ -272,9 +275,11 @@ class TestHa(PostgresInit):
             str(uuid.uuid4()), CommandKind.STOP, DesiredRole.UNCHANGED, 1,
             StopMode.FAST, CheckpointMode.DEFAULT, (EventKind.SAFEPOINT,), None, ReloadMode.RESTART,
             None, CloneMode.CONFIGURED, DivergencePolicy.NONE, None, BootstrapState.IDLE,
+            None,
+            None,
         )
-        running = CommandResult(request, CommandState.RUNNING, CommandValue.NONE, None, None)
-        succeeded = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None)
+        running = CommandResult(request, CommandState.RUNNING, CommandValue.NONE, None, None, ())
+        succeeded = CommandResult(request, CommandState.SUCCEEDED, CommandValue.TRUE, None, None, ())
         event = EventRecord(request.command_id, 1, EventKind.SAFEPOINT, None, None)
         self.ha.node = Mock()
         self.ha.node.submit.return_value = CommandSubmission(SubmitState.ACCEPTED, running)
@@ -2064,7 +2069,7 @@ class TestHa(PostgresInit):
     @patch('builtins.open', mock_open())
     @patch.object(ConfigHandler, 'check_recovery_conf', Mock(return_value=(False, False)))
     @patch.object(Postgresql, 'major_version', PropertyMock(return_value=130000))
-    @patch.object(SlotsHandler, 'sync_replication_slots', Mock(return_value=['ls']))
+    @patch.object(SlotsHandler, 'apply_replication_slots', Mock(return_value=['ls']))
     def test_follow_copy(self):
         self.ha.cluster.config.data['slots'] = {'ls': {'database': 'a', 'plugin': 'b'}}
         self.p.is_primary = false

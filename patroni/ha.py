@@ -14,11 +14,12 @@ from . import global_config, psycopg, thread_pool
 from .__main__ import Patroni
 from .async_executor import AsyncExecutor, CriticalTask
 from .collections import CaseInsensitiveSet
-from .control import BootstrapState, CallbackKind, CancelMode, CheckpointMode, CloneMode, \
-    CommandKind, CommandResult, CommandState, CommandValue, DesiredRole, DivergencePolicy, \
-    EventKind, EventRecord, FollowTarget, Freshness, LifecycleCommand, NodeSnapshot, \
-    ObservationContext, PostgresRole as ControlPostgresRole, PostgresState as ControlPostgresState, \
-    RecoveryTarget, ReloadMode, SlotMode, SnapshotDetail, StopMode, SubmitState, TargetKind
+from .control import BootstrapState, CallbackKind, CancelMode, CheckpointMode, CloneMode, CommandKind, CommandResult, \
+    CommandState, CommandValue, DesiredRole, DivergencePolicy, EventKind, EventRecord, FollowTarget, Freshness, \
+    LifecycleCommand, NodeSnapshot, NodeWatchdog, ObservationContext, PostgresRole as ControlPostgresRole, \
+    PostgresState as ControlPostgresState, RecoveryTarget, ReloadMode, SlotAction, SlotCapabilities, SlotContext, \
+    SlotKind, SlotMember, SlotMode, SlotPlan, SlotSpec, SlotTags, SnapshotDetail, StopMode, SubmitState, SyncAction, \
+    SyncContext, SyncCount, SyncMember, SyncPlan, TargetKind
 from .dcs import AbstractDCS, Cluster, Leader, Member, RemoteMember, Status, SyncState
 from .exceptions import DCSError, PatroniFatalException, PostgresConnectionException
 from .postgresql.misc import postgres_version_to_int, PostgresqlRole, PostgresqlState
@@ -29,6 +30,21 @@ from .utils import parse_int, polling_loop, tzutc
 logger = logging.getLogger(__name__)
 
 COMMAND_WAIT_SECONDS = 0.05
+
+
+class _SyncView(NamedTuple):
+    sync_type: str
+    numsync: int
+    sync: CaseInsensitiveSet
+    sync_confirmed: CaseInsensitiveSet
+    active: CaseInsensitiveSet
+    configured: str
+
+
+class _SlotView(NamedTuple):
+    name: str
+    can_advance_slots: bool
+    role: PostgresqlRole
 
 
 class _NodeCancellable:
@@ -268,7 +284,7 @@ class Ha(object):
         self._crash_recovery_started = 0
         self._start_timeout = None
         self._async_executor = AsyncExecutor(cast(Any, _NodeCancellable(self.node)), self.wakeup)
-        self.watchdog = patroni.watchdog
+        self.watchdog = NodeWatchdog(self.node)
 
         # Each member publishes various pieces of information to the DCS using touch_member. This lock protects
         # the state and publishing procedure to have consistent ordering and avoid publishing stale values.
@@ -335,13 +351,18 @@ class Ha(object):
 
     def _run_command(self, command: LifecycleCommand,
                      handler: Optional[Callable[[EventRecord], None]] = None) -> Optional[bool]:
+        result = self._wait_command(command, handler)
+        return _command_value(result) if result else False
+
+    def _wait_command(self, command: LifecycleCommand,
+                      handler: Optional[Callable[[EventRecord], None]] = None) -> Optional[CommandResult]:
         with self._command_lock:
             self._active_command_id = command.command_id
 
         try:
             submission = self.node.submit(command)
             if submission.state not in (SubmitState.ACCEPTED, SubmitState.REPLAYED):
-                return False
+                return None
 
             sequence = 0
             while True:
@@ -353,9 +374,9 @@ class Ha(object):
 
                 result = self.node.command_wait(command.command_id, COMMAND_WAIT_SECONDS)
                 if result is None:
-                    return False
+                    return None
                 if result.state != CommandState.RUNNING:
-                    return _command_value(result)
+                    return result
         finally:
             with self._command_lock:
                 if self._active_command_id == command.command_id:
@@ -383,10 +404,14 @@ class Ha(object):
                    clone_mode: CloneMode = CloneMode.CONFIGURED,
                    divergence: DivergencePolicy = DivergencePolicy.NONE,
                    callback: Optional[CallbackKind] = None,
-                   bootstrap_state: BootstrapState = BootstrapState.IDLE) -> LifecycleCommand:
+                   bootstrap_state: BootstrapState = BootstrapState.IDLE,
+                   sync_plan: Optional[SyncPlan] = None,
+                   slot_plan: Optional[SlotPlan] = None) -> LifecycleCommand:
         return LifecycleCommand(
             str(uuid.uuid4()), kind, role, timeout, stop_mode, checkpoint, events, target, reload_mode,
             recovery_target, clone_mode, divergence, callback, bootstrap_state,
+            sync_plan,
+            slot_plan,
         )
 
     def _stop_immediate(self) -> Optional[bool]:
@@ -408,6 +433,105 @@ class Ha(object):
 
     def _ensure_checkpoint(self) -> Optional[bool]:
         return self._run_command(self._lifecycle(CommandKind.CHECKPOINT))
+
+    def _set_sync(self, members: Collection[str], count: SyncCount = SyncCount.DEFAULT,
+                  numsync: Optional[int] = None) -> Optional[bool]:
+        plan = SyncPlan(SyncAction.SET, tuple(members), count, numsync)
+        return self._run_command(self._lifecycle(CommandKind.APPLY_SYNC, sync_plan=plan))
+
+    def _refresh_sync(self) -> Optional[bool]:
+        plan = SyncPlan(SyncAction.REFRESH, (), SyncCount.DEFAULT, None)
+        return self._run_command(self._lifecycle(CommandKind.APPLY_SYNC, sync_plan=plan))
+
+    @staticmethod
+    def _sync_context(cluster: Cluster) -> SyncContext:
+        members = tuple(SyncMember(
+            member.name,
+            member.is_running,
+            bool(member.nofailover),
+            bool(member.nosync),
+            member.replicatefrom,
+            member.sync_priority,
+        ) for member in cluster.members)
+        return SyncContext(cluster.sync.leader, tuple(cluster.sync.voters), cluster.sync.quorum, members)
+
+    def _sync_state(self, cluster: Cluster) -> _SyncView:
+        state = self.node.sync_state(self._sync_context(cluster))
+        return _SyncView(
+            state.sync_type.value,
+            state.numsync,
+            CaseInsensitiveSet(state.sync),
+            CaseInsensitiveSet(state.confirmed),
+            CaseInsensitiveSet(state.active),
+            state.configured,
+        )
+
+    @staticmethod
+    def _slot_tags(tags: Tags) -> SlotTags:
+        return SlotTags(bool(tags.nofailover), bool(tags.nostream), tags.replicatefrom)
+
+    def _slot_context(self, cluster: Cluster, capabilities: SlotCapabilities) -> SlotContext:
+        members: List[SlotMember] = []
+        for member in cluster.members:
+            conn_kwargs = member.conn_kwargs()
+            members.append(SlotMember(
+                member.name,
+                str(conn_kwargs['host']) if conn_kwargs.get('host') else None,
+                str(conn_kwargs['port']) if conn_kwargs.get('port') else None,
+                str(conn_kwargs['dbname']) if conn_kwargs.get('dbname') else None,
+                member.is_running,
+                member.lsn,
+                self._slot_tags(member),
+            ))
+
+        return SlotContext(
+            capabilities.name,
+            bool(cluster.config),
+            (cluster.leader.name or None) if cluster.leader else None,
+            tuple(members),
+            tuple(sorted(cluster.slots.items())),
+            tuple(cluster.status.retain_slots),
+            self._slot_tags(self.patroni),
+        )
+
+    @staticmethod
+    def _slot_specs(slots: Dict[str, Dict[str, Any]]) -> Tuple[SlotSpec, ...]:
+        specs: List[SlotSpec] = []
+        for name, value in sorted(slots.items()):
+            specs.append(SlotSpec(
+                name,
+                SlotKind(value.get('type', SlotKind.PHYSICAL.value)),
+                str(value['database']) if value.get('database') else None,
+                str(value['plugin']) if value.get('plugin') else None,
+                parse_int(value.get('lsn')),
+                bool(value['expected_active']) if 'expected_active' in value else None,
+                bool(value['failover']) if 'failover' in value else None,
+            ))
+        return tuple(specs)
+
+    def _slot_plan(self, cluster: Cluster, action: SlotAction,
+                   copy_slots: Collection[str] = ()) -> SlotPlan:
+        capabilities = self.node.slot_capabilities()
+        role = cast(PostgresqlRole, self._pg_role())
+        view = _SlotView(capabilities.name, capabilities.can_advance, role)
+        slots = cluster.get_replication_slots(cast(Any, view), self.patroni, role=role, show_error=True)
+        return SlotPlan(
+            action,
+            self._slot_context(cluster, capabilities),
+            self._slot_specs(slots),
+            tuple(copy_slots),
+        )
+
+    def _apply_slots(self, cluster: Cluster) -> List[str]:
+        plan = self._slot_plan(cluster, SlotAction.APPLY)
+        result = self._wait_command(self._lifecycle(CommandKind.APPLY_SLOTS, slot_plan=plan))
+        if result is None or result.state != CommandState.SUCCEEDED:
+            return []
+        return list(result.output)
+
+    def _copy_slots(self, cluster: Cluster, slots: Collection[str]) -> Optional[bool]:
+        plan = self._slot_plan(cluster, SlotAction.COPY, slots)
+        return self._run_command(self._lifecycle(CommandKind.COPY_SLOTS, slot_plan=plan))
 
     @staticmethod
     def _desired_role(role: PostgresqlRole) -> DesiredRole:
@@ -584,7 +708,10 @@ class Ha(object):
         if update_status:
             try:
                 last_lsn = self._last_wal_lsn = self.node.last_operation()
-                slots = self.cluster.maybe_filter_permanent_slots(self.state_handler, self.state_handler.slots())
+                capabilities = self.node.slot_capabilities()
+                role = cast(PostgresqlRole, self._pg_role())
+                view = _SlotView(capabilities.name, capabilities.can_advance, role)
+                slots = self.cluster.maybe_filter_permanent_slots(cast(Any, view), self.node.slots())
             except Exception:
                 logger.exception('Exception when called state_handler.last_operation()')
         try:
@@ -926,7 +1053,7 @@ class Ha(object):
                 node_to_follow = self._get_node_to_follow(self.cluster)
 
             if self.is_synchronous_mode():
-                self.state_handler.sync_handler.set_synchronous_standby_names(CaseInsensitiveSet())
+                self._set_sync(())
 
         command = self._lifecycle(
             CommandKind.FOLLOW,
@@ -1092,11 +1219,11 @@ class Ha(object):
         """
         # If synchronous_mode was turned off, we need to update synchronous_standby_names in Postgres
         if not self.cluster.sync.is_empty and self.dcs.delete_sync_state(version=self.cluster.sync.version):
-            self.state_handler.sync_handler.set_synchronous_standby_names(CaseInsensitiveSet())
+            self._set_sync(())
             logger.info("Disabled synchronous replication")
 
         # As synchronous_mode is off, check if the user configured Postgres synchronous replication instead
-        self._run_command(self._lifecycle(CommandKind.APPLY_SYNC))
+        self._refresh_sync()
 
     def _handle_synchronous_strict_mode(self, dcs_state: SyncState, replication_state: Any) -> bool:
         """Handle strict synchronous mode.
@@ -1127,10 +1254,10 @@ class Ha(object):
             if voters != replication_state.sync or \
                     numsync != replication_state.numsync or \
                     sync_type != replication_state.sync_type:
-                self.state_handler.sync_handler.set_synchronous_standby_names(voters, numsync)
+                self._set_sync(voters, SyncCount.EXPLICIT, numsync)
             elif voters:
                 msg = 'Continue using old value of synchronous_standby_names="{0}". '.format(
-                    self.state_handler.synchronous_standby_names())
+                    replication_state.configured)
 
             # We use self._synchronous_strict_mode_activated to show warning only once.
             if not self._synchronous_strict_mode_activated:
@@ -1143,7 +1270,7 @@ class Ha(object):
                     not dcs_state.voters and (replication_state.sync or replication_state.numsync):
                 # For non-strict mode remove synchronous_standby_names name from postgresql.conf if there is
                 # something, but there are no active nodes which could be added to synchronous_standby_names later.
-                self.state_handler.sync_handler.set_synchronous_standby_names([])
+                self._set_sync(())
             self._synchronous_strict_mode_activated = False
 
         return self._synchronous_strict_mode_activated
@@ -1171,7 +1298,7 @@ class Ha(object):
 
         while True:
             transition = 'break'  # we need define transition value if `QuorumStateResolver` produced no changes
-            sync_state = self.state_handler.sync_handler.current_state(self.cluster)
+            sync_state = self._sync_state(self.cluster)
 
             if leader == self.state_handler.name and \
                     self._handle_synchronous_strict_mode(sync, sync_state):
@@ -1195,11 +1322,11 @@ class Ha(object):
                     if not sync:
                         return logger.info('Synchronous replication key updated by someone else.')
                 elif transition == 'sync':
-                    self.state_handler.sync_handler.set_synchronous_standby_names(nodes, num)
+                    self._set_sync(nodes, SyncCount.EXPLICIT, num)
 
             if transition == 'break' and sync_state.sync_type != 'quorum':
                 # FIRST -> ANY
-                self.state_handler.sync_handler.set_synchronous_standby_names(sync_state.sync, sync_state.numsync)
+                self._set_sync(sync_state.sync, SyncCount.EXPLICIT, sync_state.numsync)
 
             if transition != 'restart' or _check_timeout(1):
                 return
@@ -1222,7 +1349,7 @@ class Ha(object):
         if not sync:
             return
 
-        current_state = self.state_handler.sync_handler.current_state(self.cluster)
+        current_state = self._sync_state(self.cluster)
         picked = current_state.active
         allow_promote = current_state.sync_confirmed
         voters = CaseInsensitiveSet(sync.voters)
@@ -1249,7 +1376,7 @@ class Ha(object):
         if picked == voters == current_state.sync and current_state.numsync == len(picked):
             if current_state.sync_type != 'priority':
                 # ANY -> FIRST
-                self.state_handler.sync_handler.set_synchronous_standby_names(picked)
+                self._set_sync(picked)
             return
 
         # update synchronous standby list in dcs temporarily to point to common nodes in current and picked
@@ -1261,12 +1388,12 @@ class Ha(object):
                 return logger.info('Synchronous replication key updated by someone else.')
 
         # Update postgresql.conf and wait 2 secs for changes to become active
-        self.state_handler.sync_handler.set_synchronous_standby_names(picked)
+        self._set_sync(picked)
 
         if picked and allow_promote != picked:
             # Wait for PostgreSQL to enable synchronous mode and see if we can immediately set sync_standby
             time.sleep(2)
-            allow_promote = self.state_handler.sync_handler.current_state(self.cluster).sync_confirmed
+            allow_promote = self._sync_state(self.cluster).sync_confirmed
 
         if allow_promote and allow_promote != sync_common:
             if self.dcs.write_sync_state(self.state_handler.name, allow_promote, 0, version=sync.version):
@@ -1311,7 +1438,7 @@ class Ha(object):
         if not self.dcs.write_sync_state(self.state_handler.name, sync, 0, version=self.cluster.sync.version):
             return False
 
-        self.state_handler.sync_handler.set_synchronous_standby_names(sync, numsync)
+        self._set_sync(sync, SyncCount.EXPLICIT, numsync)
         return True
 
     def _process_quorum_prepromote(self) -> None:
@@ -1332,7 +1459,7 @@ class Ha(object):
             numsync += 1
         numsync = max(numsync, global_config.min_synchronous_nodes)
 
-        self.state_handler.sync_handler.set_synchronous_standby_names(sync, numsync)
+        self._set_sync(sync, SyncCount.EXPLICIT, numsync)
 
     def process_sync_replication_prepromote(self) -> bool:
         """Handle sync replication state before promote.
@@ -1581,7 +1708,7 @@ class Ha(object):
             'api_url': self.patroni.api.connection_string,
         }
         try:
-            data['slots'] = self.state_handler.slots()
+            data['slots'] = self.node.slots()
         except Exception:
             logger.exception('Exception when called state_handler.slots()')
 
@@ -2066,7 +2193,7 @@ class Ha(object):
                 node_to_follow, leader = None, None
 
         if self.is_synchronous_mode():
-            self.state_handler.sync_handler.set_synchronous_standby_names(CaseInsensitiveSet())
+            self._set_sync(())
 
         role = PostgresqlRole.STANDBY_LEADER if is_standby_leader else PostgresqlRole.REPLICA
         # FIXME: with mode offline called from DCS exception handler and handle_long_action_in_progress
@@ -2535,7 +2662,7 @@ class Ha(object):
         self.dcs.take_leader()
         self.set_is_leader(True)
         if self.is_synchronous_mode():
-            self.state_handler.sync_handler.set_synchronous_standby_names([], global_config.min_synchronous_nodes)
+            self._set_sync((), SyncCount.EXPLICIT, global_config.min_synchronous_nodes)
         self._callback(CallbackKind.START)
         self.load_cluster_from_dcs()
 
@@ -2761,8 +2888,8 @@ class Ha(object):
 
                 if not is_promoting and create_slots and self.cluster.leader:
                     err = self._async_executor.try_run_async('copy_logical_slots',
-                                                             self.state_handler.slots_handler.copy_logical_slots,
-                                                             args=(self.cluster, self.patroni, create_slots))
+                                                             self._copy_slots,
+                                                             args=(self.cluster, create_slots))
                     if not err:
                         ret = 'Copying logical slots {0} from the primary'.format(create_slots)
             return ret
@@ -2815,7 +2942,7 @@ class Ha(object):
         # Failsafe.update_cluster(), that will return "modified" Cluster if failsafe mode is active.
         cluster = self._failsafe.update_cluster(self.cluster) if self.is_failsafe_mode() else self.cluster
         if cluster:
-            slots = self.state_handler.slots_handler.sync_replication_slots(cluster, self.patroni)
+            slots = self._apply_slots(cluster)
         # Don't copy replication slots if failsafe_mode is active
         return [] if self.failsafe_is_active() else slots
 

@@ -14,12 +14,13 @@ from patroni.utils import RetryFailedError
 
 from .commands import AgentCommands, CancelMode, CommandResult, \
     CommandSubmission, EventRecord, LifecycleCommand, RecoveryTarget
-from .models import ConfigChange, Freshness, LocalPostgres, NodeSnapshot, \
-    ObservationContext, ObservationFailure, PostgresRole, PostgresState, QueryMode, \
-    RecoverySnapshot, ReplicationConnection, SnapshotDetail, TimelineWal, WalObservation
+from .models import ConfigChange, Freshness, LocalPostgres, NodeSnapshot, ObservationContext, ObservationFailure, \
+    PostgresRole, PostgresState, QueryMode, RecoverySnapshot, ReplicationConnection, SlotCapabilities, SnapshotDetail, \
+    SyncContext, SyncSnapshot, TimelineWal, WalObservation, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 
 if TYPE_CHECKING:  # pragma: no cover
     from .recovery import PostgresRecovery
+    from .replication import PostgresReplication
 
 MAX_CONSISTENCY_ATTEMPTS = 2
 MAX_REPLICATION_CONNECTIONS = 4096
@@ -90,6 +91,10 @@ class PostgresObserver(ABC):
     @abstractmethod
     def server_version(self) -> int:
         """Read connected PostgreSQL version."""
+
+    @abstractmethod
+    def slots(self) -> Dict[str, int]:
+        """Read current replication-slot positions."""
 
 
 class NodeControl(ABC):
@@ -181,6 +186,10 @@ class NodeControl(ABC):
         """Return connected PostgreSQL version."""
 
     @abstractmethod
+    def slots(self) -> Dict[str, int]:
+        """Return current replication-slot positions."""
+
+    @abstractmethod
     def recovery(self) -> RecoverySnapshot:
         """Return agent-owned recovery state."""
 
@@ -228,13 +237,42 @@ class NodeControl(ABC):
     def reset_cancel(self) -> None:
         """Reset agent subprocess cancellation state."""
 
+    @abstractmethod
+    def watchdog(self) -> WatchdogSnapshot:
+        """Return local watchdog health."""
+
+    @abstractmethod
+    def activate_watchdog(self) -> bool:
+        """Activate the local watchdog."""
+
+    @abstractmethod
+    def disable_watchdog(self) -> None:
+        """Disable the local watchdog."""
+
+    @abstractmethod
+    def keepalive_watchdog(self) -> None:
+        """Keep the local watchdog alive."""
+
+    @abstractmethod
+    def reload_watchdog(self, timing: WatchdogTiming) -> WatchdogReload:
+        """Apply ordered watchdog timing."""
+
+    @abstractmethod
+    def sync_state(self, context: SyncContext) -> SyncSnapshot:
+        """Return current synchronous replication state."""
+
+    @abstractmethod
+    def slot_capabilities(self) -> SlotCapabilities:
+        """Return local slot-policy capabilities."""
+
 
 class InProcessNodeControl(NodeControl):
     """Collect snapshots through the same API a future agent client uses."""
 
     def __init__(self, agent_boot_id: str, observer: PostgresObserver,
                  clock: Callable[[], float], commands: Optional[AgentCommands] = None,
-                 recovery: Optional['PostgresRecovery'] = None) -> None:
+                 recovery: Optional['PostgresRecovery'] = None,
+                 replication: Optional['PostgresReplication'] = None) -> None:
         if agent_boot_id != str(UUID(agent_boot_id)):
             raise ValueError('agent_boot_id is not a canonical UUID')
 
@@ -243,6 +281,7 @@ class InProcessNodeControl(NodeControl):
         self._clock = clock
         self._commands = commands
         self._recovery = recovery
+        self._replication = replication
         self._lock = RLock()
         self._sequence = 0
         self._cache: Dict[SnapshotDetail, NodeSnapshot] = {}
@@ -345,6 +384,10 @@ class InProcessNodeControl(NodeControl):
         with self._lock:
             return self._observer.server_version()
 
+    def slots(self) -> Dict[str, int]:
+        with self._lock:
+            return self._observer.slots()
+
     def recovery(self) -> RecoverySnapshot:
         return self._recovery_service().snapshot()
 
@@ -381,11 +424,38 @@ class InProcessNodeControl(NodeControl):
     def reset_cancel(self) -> None:
         self._recovery_service().reset_cancel()
 
+    def watchdog(self) -> WatchdogSnapshot:
+        return self._replication_service().watchdog()
+
+    def activate_watchdog(self) -> bool:
+        return self._replication_service().activate_watchdog()
+
+    def disable_watchdog(self) -> None:
+        self._replication_service().disable_watchdog()
+
+    def keepalive_watchdog(self) -> None:
+        self._replication_service().keepalive_watchdog()
+
+    def reload_watchdog(self, timing: WatchdogTiming) -> WatchdogReload:
+        return self._replication_service().reload_watchdog(timing)
+
+    def sync_state(self, context: SyncContext) -> SyncSnapshot:
+        return self._replication_service().sync_state(context)
+
+    def slot_capabilities(self) -> SlotCapabilities:
+        return self._replication_service().slot_capabilities()
+
     def _recovery_service(self) -> 'PostgresRecovery':
         if self._recovery is None:
             raise RuntimeError('recovery service is not configured')
 
         return self._recovery
+
+    def _replication_service(self) -> 'PostgresReplication':
+        if self._replication is None:
+            raise RuntimeError('replication service is not configured')
+
+        return self._replication
 
     def _collect(self, detail: SnapshotDetail, context: ObservationContext,
                  query_mode: QueryMode, attempts: int) -> NodeSnapshot:

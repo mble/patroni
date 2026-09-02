@@ -605,6 +605,13 @@ class SlotsHandler:
 
         :returns: list of logical replication slots names that should be copied from the primary.
         """
+        slots = cluster.get_replication_slots(self._postgresql, tags, show_error=True) \
+            if self._postgresql.major_version >= 90400 and cluster.config else {}
+        return self.apply_replication_slots(cluster, tags, slots)
+
+    def apply_replication_slots(self, cluster: Cluster, tags: Tags,
+                                slots: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Apply a controller-computed replication-slot plan."""
         ret = []
         if self._postgresql.major_version >= 90400 and cluster.config:
             try:
@@ -615,8 +622,6 @@ class SlotsHandler:
                 if self._postgresql.major_version >= 170000 and not self._postgresql.is_primary() and \
                         not cluster.is_unlocked() and (cluster.leader and cluster.leader.name != self._postgresql.name):
                     self._drop_incorrect_failover_synced_slots()
-
-                slots = cluster.get_replication_slots(self._postgresql, tags, show_error=True)
 
                 if self._force_readiness_check:
                     self._logical_slots_processing_queue = {
@@ -763,10 +768,15 @@ class SlotsHandler:
         :param tags: reference to an object implementing :class:`Tags` interface.
         :param create_slots: list of slot names to copy from the primary.
         """
+        slots = cluster.get_replication_slots(self._postgresql, tags, role=PostgresqlRole.REPLICA)
+        self.apply_logical_slots(cluster, tags, create_slots, slots)
+
+    def apply_logical_slots(self, cluster: Cluster, tags: Tags, create_slots: List[str],
+                            slots: Dict[str, Dict[str, Any]]) -> None:
+        """Copy controller-approved logical slots from the primary."""
         leader = cluster.leader
         if not leader:
             return
-        slots = cluster.get_replication_slots(self._postgresql, tags, role=PostgresqlRole.REPLICA)
         copy_slots: Dict[str, Dict[str, Any]] = {}
         with self._get_leader_connection_cursor(leader) as cur:
             try:
