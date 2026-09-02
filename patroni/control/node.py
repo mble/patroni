@@ -134,7 +134,8 @@ class NodeControl(ABC):
         """Cancel a lifecycle command."""
 
     @abstractmethod
-    def command_events(self, command_id: str, after_sequence: int) -> Tuple[EventRecord, ...]:
+    def command_events(self, command_id: str, after_sequence: int,
+                       timeout: Optional[float] = None) -> Tuple[EventRecord, ...]:
         """Return lifecycle events after a sequence."""
 
     @abstractmethod
@@ -238,6 +239,10 @@ class NodeControl(ABC):
         """Reset agent subprocess cancellation state."""
 
     @abstractmethod
+    def fence(self, timeout: Optional[float]) -> bool:
+        """Preempt work and stop a primary."""
+
+    @abstractmethod
     def watchdog(self) -> WatchdogSnapshot:
         """Return local watchdog health."""
 
@@ -328,8 +333,9 @@ class InProcessNodeControl(NodeControl):
     def command_cancel(self, command_id: str) -> Optional[CommandResult]:
         return self._command_service().cancel(command_id)
 
-    def command_events(self, command_id: str, after_sequence: int) -> Tuple[EventRecord, ...]:
-        return self._command_service().events(command_id, after_sequence)
+    def command_events(self, command_id: str, after_sequence: int,
+                       timeout: Optional[float] = None) -> Tuple[EventRecord, ...]:
+        return self._command_service().events(command_id, after_sequence, timeout)
 
     def command_ack(self, command_id: str, sequence: int) -> None:
         self._command_service().ack(command_id, sequence)
@@ -423,6 +429,9 @@ class InProcessNodeControl(NodeControl):
 
     def reset_cancel(self) -> None:
         self._recovery_service().reset_cancel()
+
+    def fence(self, timeout: Optional[float]) -> bool:
+        return self._command_service().fence(timeout)
 
     def watchdog(self) -> WatchdogSnapshot:
         return self._replication_service().watchdog()

@@ -16,6 +16,7 @@ TERMINAL_COMMAND_STATES = frozenset((
     CommandState.SUCCEEDED,
     CommandState.FAILED,
     CommandState.CANCELLED,
+    CommandState.FENCED,
 ))
 SAFE_WITHOUT_AUTHORITY = frozenset((
     CommandKind.STOP,
@@ -131,6 +132,8 @@ class SafetyState:
             return CommandReceipt(action, status.state)
 
         if self._active_command_id:
+            return CommandReceipt(SafetyAction.REJECT, CommandState.FAILED)
+        if self._agent_state == AgentState.FENCING:
             return CommandReceipt(SafetyAction.REJECT, CommandState.FAILED)
         if not self._allows(request):
             return CommandReceipt(SafetyAction.REJECT, CommandState.FAILED)
@@ -320,7 +323,7 @@ class SafetyState:
         _boot_id(request.command_id, 'command_id')
         self._identities(request.controller_boot_id, request.agent_boot_id)
         _counter(request.sequence, 'sequence')
-        _counter(request.authority_term, 'authority_term')
+        _authority_term(request.authority_term)
         _enum(request.kind, CommandKind, 'command kind')
         _enum(request.target_role, DesiredRole, 'desired role')
 
@@ -362,6 +365,13 @@ def _counter(value: object, name: str) -> None:
         raise ValidationError('{0} is not an integer'.format(name))
     if value < 1 or value > MAX_COUNTER:
         raise ValidationError('{0} is out of range'.format(name))
+
+
+def _authority_term(value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValidationError('authority_term is not an integer')
+    if value < 0 or value > MAX_COUNTER:
+        raise ValidationError('authority_term is out of range')
 
 
 def _finite(value: object, name: str) -> None:

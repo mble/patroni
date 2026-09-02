@@ -3,7 +3,7 @@ import logging
 import time
 
 from threading import Event
-from typing import Any, cast, Protocol, TYPE_CHECKING
+from typing import Any, cast, Mapping, NamedTuple, Optional, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
 from patroni import global_config
@@ -15,6 +15,8 @@ from patroni.control.postgres import LocalPostgresObserver
 from patroni.control.postgres_commands import PostgresCommandDriver
 from patroni.control.recovery import PostgresRecovery
 from patroni.control.replication import PostgresReplication
+from patroni.control.rpc import AgentRpc
+from patroni.control.unix import DEFAULT_MAX_WORKERS, DEFAULT_SOCKET_MODE, DEFAULT_TIMEOUT, peer_check, UnixServer
 from patroni.daemon import abstract_main, AbstractPatroniDaemon, get_base_arg_parser
 from patroni.exceptions import PatroniFatalException
 from patroni.postgresql import Postgresql
@@ -39,6 +41,15 @@ DCS_SECTIONS = frozenset((
 SHUTDOWN_POLL_SECONDS = 0.05
 
 
+class _ControlConfig(NamedTuple):
+    path: str
+    timeout: float
+    max_workers: int
+    socket_mode: int
+    peer_uid: Optional[int]
+    peer_gid: Optional[int]
+
+
 class _ConfigView(Protocol):
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -50,6 +61,7 @@ class PatroniAgent(AbstractPatroniDaemon):
 
     def __init__(self, config: 'Config', patroni_logger: 'PatroniLogger') -> None:
         _reject_dcs(config)
+        control_config = _control_config(config)
         super().__init__(config, patroni_logger)
 
         self.agent_boot_id = str(uuid4())
@@ -75,6 +87,17 @@ class PatroniAgent(AbstractPatroniDaemon):
             recovery,
             replication,
         )
+        self._rpc = AgentRpc(
+            self.node, self.agent_boot_id, time.monotonic, self.authority, self.set_policy,
+        )
+        self._server = UnixServer(
+            control_config.path,
+            self._rpc.handle,
+            peer_check(control_config.peer_uid, control_config.peer_gid),
+            control_config.timeout,
+            control_config.max_workers,
+            control_config.socket_mode,
+        )
 
     def set_policy(self, mode: PolicyMode) -> None:
         """Retain active or paused shutdown semantics."""
@@ -83,6 +106,7 @@ class PatroniAgent(AbstractPatroniDaemon):
         self._policy = mode
 
     def run(self) -> None:
+        self._server.start()
         self.authority.start()
         super().run()
 
@@ -91,6 +115,7 @@ class PatroniAgent(AbstractPatroniDaemon):
         self._wake.clear()
 
     def _shutdown(self) -> None:
+        self._server.close()
         self.authority.close()
         if self._policy == PolicyMode.ACTIVE:
             self._stop_postgres()
@@ -144,6 +169,41 @@ def _reject_dcs(config: _ConfigView) -> None:
         raise PatroniFatalException(
             'agent configuration contains DCS section: {0}'.format(', '.join(configured)),
         )
+
+
+def _control_config(config: _ConfigView) -> _ControlConfig:
+    raw = config.get('agent')
+    if not isinstance(raw, Mapping):
+        raise PatroniFatalException('agent configuration requires a control socket')
+
+    values = cast(Mapping[str, object], raw)
+    path = values.get('socket')
+    timeout = values.get('timeout', DEFAULT_TIMEOUT)
+    max_workers = values.get('max_workers', DEFAULT_MAX_WORKERS)
+    socket_mode = values.get('socket_mode', DEFAULT_SOCKET_MODE)
+    peer_uid = _peer_id(values.get('peer_uid'))
+    peer_gid = _peer_id(values.get('peer_gid'))
+
+    if not isinstance(path, str) or not path:
+        raise PatroniFatalException('agent control socket is invalid')
+    if not isinstance(timeout, (float, int)) or isinstance(timeout, bool) or timeout <= 0:
+        raise PatroniFatalException('agent control timeout is invalid')
+    if not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1:
+        raise PatroniFatalException('agent control worker limit is invalid')
+    if not isinstance(socket_mode, int) or isinstance(socket_mode, bool):
+        raise PatroniFatalException('agent control socket mode is invalid')
+    return _ControlConfig(
+        path, float(timeout), max_workers, socket_mode, peer_uid, peer_gid,
+    )
+
+
+def _peer_id(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise PatroniFatalException('agent peer identity is invalid')
+
+    return value
 
 
 def main() -> None:

@@ -1,5 +1,17 @@
 # M07: Unix transport
 
+Status: complete, 2026-09-02
+
+Implementation: `patroni/control/protocol.py`, `patroni/control/rpc.py`,
+`patroni/control/unix.py`, and the `patroni-agent` socket lifecycle.
+
+The transport uses bounded tagged JSON frames over one-request Unix
+connections. The handshake fixes process identities and advertises
+capabilities. Both peers verify Linux credentials. Requests are sequenced,
+replayable, and deadline-bound. The agent rejects unsafe paths and removes only
+its own stale socket. Authority monitoring uses a separate lock and preempts
+blocked command waits. Events support bounded long-poll and acknowledgement.
+
 ## Goal
 
 Run the established contract safely between separate local processes.

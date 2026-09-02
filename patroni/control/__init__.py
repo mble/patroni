@@ -10,18 +10,22 @@ from .models import AgentState, AuthorityGrant, AuthorityKind, AuthorityState, C
     SlotKind, SlotMember, SlotSpec, SlotTags, SnapshotDetail, SyncContext, SyncMember, SyncSnapshot, SyncType, \
     TimelineWal, Timing, WalObservation, WatchdogMode, WatchdogReload, WatchdogSnapshot, WatchdogTiming
 from .node import InProcessNodeControl, NodeControl
+from .protocol import Capability
 from .replication import NodeWatchdog
+from .rpc import AgentClient
 from .safety import SafetyState, ValidationError
 
 __all__ = [
     'AckState',
     'AgentState',
     'AgentCommands',
+    'AgentClient',
     'AuthorityGrant',
     'AuthorityKind',
     'AuthorityState',
     'BootstrapState',
     'CallbackKind',
+    'Capability',
     'CancelMode',
     'CommandKind',
     'CommandDriver',

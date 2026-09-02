@@ -1,6 +1,6 @@
 import unittest
 
-from threading import Event
+from threading import Event, Thread
 from uuid import uuid4
 
 from patroni.control import BootstrapState, CallbackKind, CloneMode, \
@@ -16,6 +16,9 @@ class FakeDriver(CommandDriver):
         self.entered = Event()
         self.release = Event()
         self.cancelled = Event()
+        self.fence_entered = Event()
+        self.fence_release = Event()
+        self.fence_release.set()
         self.calls = []
 
     def run(self, command, events, cancelled):
@@ -32,6 +35,12 @@ class FakeDriver(CommandDriver):
     def cancel(self) -> None:
         self.cancelled.set()
         self.release.set()
+
+    def fence(self, timeout) -> bool:
+        self.cancel()
+        self.fence_entered.set()
+        self.fence_release.wait(1)
+        return True
 
 
 def command(command_id=None, kind=CommandKind.STOP):
@@ -126,6 +135,33 @@ class TestAgentCommands(unittest.TestCase):
         self.assertTrue(self.driver.cancelled.is_set())
         self.assertEqual(CommandState.CANCELLED, result.state)
 
+    def test_fence_preempts_active_command(self) -> None:
+        request = command()
+        self.commands.submit(request)
+        self.assertTrue(self.driver.entered.wait(1))
+
+        self.assertTrue(self.commands.fence(1))
+        result = self.commands.wait(request.command_id, 1)
+
+        self.assertEqual(CommandState.FENCED, result.state)
+        self.assertIsNone(self.commands.active())
+
+    def test_submit_waits_for_fence_completion(self) -> None:
+        first = command()
+        self.commands.submit(first)
+        self.assertTrue(self.driver.entered.wait(1))
+        self.driver.fence_release.clear()
+        worker = Thread(target=self.commands.fence, args=(1,))
+        worker.start()
+        self.assertTrue(self.driver.fence_entered.wait(1))
+        self.commands.wait(first.command_id, 1)
+
+        submission = self.commands.submit(command())
+
+        self.assertEqual(SubmitState.BUSY, submission.state)
+        self.driver.fence_release.set()
+        worker.join(1)
+
     def test_events_are_typed_and_replayable(self) -> None:
         request = command()
         self.commands.submit(request)
@@ -189,6 +225,23 @@ class TestAgentCommands(unittest.TestCase):
         next_event = channel.publish(EventKind.BEFORE_SHUTDOWN)
         cancelled.set()
         self.assertEqual(AckState.CANCELLED, channel.wait_ack(next_event.sequence, 1, cancelled))
+
+    def test_event_long_poll_returns_publish(self) -> None:
+        channel = EventChannel(str(uuid4()))
+        release = Event()
+
+        def publish() -> None:
+            release.wait(1)
+            channel.publish(EventKind.SAFEPOINT)
+
+        worker = Thread(target=publish)
+        worker.start()
+        release.set()
+
+        events = channel.wait_events(0, 1)
+
+        worker.join(1)
+        self.assertEqual((EventKind.SAFEPOINT,), tuple(event.kind for event in events))
 
 
 if __name__ == '__main__':

@@ -32,22 +32,44 @@ Every command additionally contains its command ID and required authority.
 ## Operations
 
 - `HELLO`
-- `STATUS`
+- `SNAPSHOT`
+- `INVALIDATE`
 - `GRANT`
 - `POLICY`
 - `SUBMIT`
 - `COMMAND_STATUS`
+- `ACTIVE_COMMAND`
+- `COMMAND_WAIT`
 - `EVENTS`
+- `ACK`
 - `CANCEL`
+- `CALL`
 - `FENCE`
+
+`HELLO` returns the agent boot ID, protocol version, and negotiated
+capabilities. The initial capabilities cover `NodeControl`, authority fencing,
+event acknowledgement, and event long-poll.
 
 An explicit `FENCE` request is always admissible and preempts active work.
 Automatic authority-expiry fencing is disabled under paused policy, matching
 current Patroni.
 
 `POLICY` carries Patroni's active or paused state. `EVENTS` is a bounded
-long-poll used for shutdown safepoints and command completion. Events have
+long-poll used for shutdown safepoints. Events have
 monotonic sequence numbers and explicit acknowledgement.
+
+Agent configuration requires an absolute socket path:
+
+```yaml
+agent:
+  socket: /run/patroni/agent.sock
+  socket_mode: 384  # 0600
+  timeout: 5
+  max_workers: 16
+```
+
+`peer_uid` and `peer_gid` may constrain the controller identity. Their defaults
+are the agent's effective UID and GID.
 
 ## Commands
 

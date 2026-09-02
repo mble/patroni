@@ -22,6 +22,8 @@ class TestPatroniAgent(unittest.TestCase):
                 _reject_dcs({section: {'host': 'dcs'}})
 
     @patch('patroni.agent.AbstractPatroniDaemon.__init__')
+    @patch('patroni.agent.UnixServer')
+    @patch('patroni.agent.AgentRpc')
     @patch('patroni.agent.InProcessNodeControl')
     @patch('patroni.agent.AgentCommands')
     @patch('patroni.agent.PostgresCommandDriver')
@@ -32,17 +34,39 @@ class TestPatroniAgent(unittest.TestCase):
     @patch('patroni.agent.get_mpp')
     @patch('patroni.agent.global_config.update')
     def test_agent_constructs_no_dcs_client(self, update, get_mpp, watchdog, postgresql,
-                                            recovery, replication, driver, commands, node, daemon_init) -> None:
-        config = AgentConfig(postgresql={'name': 'node-a'})
+                                            recovery, replication, driver, commands, node, rpc,
+                                            server, daemon_init) -> None:
+        config = AgentConfig(
+            postgresql={'name': 'node-a'},
+            agent={'socket': '/run/patroni/agent.sock'},
+        )
 
         agent = PatroniAgent(config, Mock())
 
         postgresql.assert_called_once_with(config['postgresql'], get_mpp.return_value)
         self.assertEqual(node.return_value, agent.node)
+        server.assert_called_once()
+
+    @patch('patroni.agent.AbstractPatroniDaemon.__init__')
+    def test_agent_requires_control_socket(self, daemon_init) -> None:
+        with self.assertRaises(PatroniFatalException):
+            PatroniAgent(AgentConfig(postgresql={'name': 'node-a'}), Mock())
+
+    @patch('patroni.agent.AbstractPatroniDaemon.run')
+    def test_transport_starts_before_daemon_loop(self, daemon_run) -> None:
+        agent = object.__new__(PatroniAgent)
+        agent._server = Mock()
+        agent.authority = Mock()
+
+        agent.run()
+
+        agent._server.start.assert_called_once_with()
+        agent.authority.start.assert_called_once_with()
 
     def test_active_shutdown_stops_postgres(self) -> None:
         agent = object.__new__(PatroniAgent)
         agent.authority = Mock()
+        agent._server = Mock()
         agent.node = Mock()
         agent.config = {'retry_timeout': 1}
         agent._policy = PolicyMode.ACTIVE
@@ -60,12 +84,14 @@ class TestPatroniAgent(unittest.TestCase):
     def test_paused_shutdown_preserves_postgres(self) -> None:
         agent = object.__new__(PatroniAgent)
         agent.authority = Mock()
+        agent._server = Mock()
         agent.node = Mock()
         agent._policy = PolicyMode.PAUSED
 
         agent._shutdown()
 
         agent.node.submit.assert_not_called()
+        agent._server.close.assert_called_once_with()
         agent.node.disable_watchdog.assert_called_once_with()
 
 

@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from enum import Enum
-from threading import Condition, Event, RLock, Thread
+from threading import Condition, Event, Lock, RLock, Thread
 from typing import cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
@@ -177,6 +177,7 @@ class SubmitState(str, Enum):
     REPLAYED = 'replayed'
     BUSY = 'busy'
     CONFLICT = 'conflict'
+    REJECTED = 'rejected'
 
 
 class EventKind(str, Enum):
@@ -302,7 +303,7 @@ class EventChannel:
         if event_kind == EventKind.SHUTDOWN and (checkpoint_location is None or previous_location is None):
             raise ValueError('shutdown event requires WAL locations')
 
-        with self._lock:
+        with self._changed:
             self._sequence += 1
             event = EventRecord(
                 self._command_id,
@@ -315,6 +316,8 @@ class EventChannel:
             if len(self._events) > MAX_COMMAND_EVENTS:
                 self._events.pop(0)
 
+            self._changed.notify_all()
+
             return event
 
     def events(self, after_sequence: int) -> Tuple[EventRecord, ...]:
@@ -323,6 +326,24 @@ class EventChannel:
 
         with self._lock:
             return tuple(event for event in self._events if event.sequence > after_sequence)
+
+    def wait_events(self, after_sequence: int, timeout: Optional[float]) -> Tuple[EventRecord, ...]:
+        """Wait bounded time for events after a sequence."""
+        if after_sequence < 0:
+            raise ValueError('negative event sequence')
+        _timeout(timeout)
+
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        with self._changed:
+            while True:
+                events = tuple(event for event in self._events if event.sequence > after_sequence)
+                if events or deadline is None:
+                    return events
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return ()
+                self._changed.wait(remaining)
 
     def ack(self, sequence: int) -> None:
         if sequence < 0:
@@ -367,6 +388,11 @@ class CommandDriver(ABC):
     def cancel(self) -> None:
         """Cancel the active driver operation."""
 
+    def fence(self, timeout: Optional[float]) -> bool:
+        """Stop PostgreSQL independently from the command worker."""
+        self.cancel()
+        return False
+
 
 class _Entry:
 
@@ -376,6 +402,7 @@ class _Entry:
         self.cancelled = Event()
         self.done = Event()
         self.thread: Optional[Thread] = None
+        self.fence_pending = False
 
 
 class AgentCommands:
@@ -388,6 +415,11 @@ class AgentCommands:
         self._entries: 'OrderedDict[str, _Entry]' = OrderedDict()
         self._active: Optional[str] = None
         self._closed = Event()
+        self._fencing = Event()
+        self._fence_done = Event()
+        self._fence_done.set()
+        self._fence_lock = Lock()
+        self._fence_workers = 0
 
     def submit(self, command: LifecycleCommand) -> CommandSubmission:
         _command(command)
@@ -409,6 +441,8 @@ class AgentCommands:
                     self._entries[command.command_id] = entry
                     return CommandSubmission(SubmitState.REPLAYED, result)
             if self._active is not None:
+                return CommandSubmission(SubmitState.BUSY, None)
+            if self._fencing.is_set():
                 return CommandSubmission(SubmitState.BUSY, None)
             if self._closed.is_set():
                 return CommandSubmission(SubmitState.BUSY, None)
@@ -462,11 +496,12 @@ class AgentCommands:
         self._driver.cancel()
         return entry.result
 
-    def events(self, command_id: str, after_sequence: int) -> Tuple[EventRecord, ...]:
+    def events(self, command_id: str, after_sequence: int,
+               timeout: Optional[float] = None) -> Tuple[EventRecord, ...]:
         _command_id(command_id)
         with self._lock:
             entry = self._entries.get(command_id)
-        return entry.events.events(after_sequence) if entry else ()
+        return entry.events.wait_events(after_sequence, timeout) if entry else ()
 
     def ack(self, command_id: str, sequence: int) -> None:
         _command_id(command_id)
@@ -484,6 +519,31 @@ class AgentCommands:
             if entry.thread:
                 entry.thread.join(1)
 
+    def fence(self, timeout: Optional[float]) -> bool:
+        """Preempt active work and fence PostgreSQL."""
+        _timeout(timeout)
+        with self._fence_lock:
+            with self._lock:
+                entry = self._entries.get(self._active) if self._active else None
+                if entry:
+                    entry.cancelled.set()
+                    entry.fence_pending = True
+                    self._fence_workers += 1
+                    entry.result = CommandResult(
+                        entry.result.request, CommandState.FENCED, CommandValue.NONE, None, None, (),
+                    )
+                self._active = None
+                self._fence_done.clear()
+                self._fencing.set()
+
+            try:
+                return self._driver.fence(timeout)
+            finally:
+                self._fence_done.set()
+                with self._lock:
+                    if self._fence_workers == 0:
+                        self._fencing.clear()
+
     def _run(self, entry: _Entry) -> None:
         try:
             driver_result = self._driver.run(entry.result.request, entry.events, entry.cancelled)
@@ -494,7 +554,10 @@ class AgentCommands:
             state = CommandState.FAILED
 
         with self._lock:
-            if entry.cancelled.is_set():
+            if entry.result.state == CommandState.FENCED:
+                state = CommandState.FENCED
+                driver_result = DriverResult(CommandValue.NONE, None, None, ())
+            elif entry.cancelled.is_set():
                 state = CommandState.CANCELLED
             entry.result = CommandResult(
                 entry.result.request,
@@ -513,7 +576,13 @@ class AgentCommands:
                     )
                     self._closed.set()
             entry.done.set()
-            self._active = None
+            if self._active == entry.result.request.command_id:
+                self._active = None
+            if entry.fence_pending:
+                entry.fence_pending = False
+                self._fence_workers -= 1
+            if self._fencing.is_set() and self._fence_done.is_set() and self._fence_workers == 0:
+                self._fencing.clear()
             self._trim()
 
     def _trim(self) -> None:

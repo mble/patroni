@@ -68,6 +68,11 @@ class PostgresCommandDriver(CommandDriver):
         if postmaster:
             self._postgresql.terminate_starting_postmaster(postmaster)
 
+    def fence(self, timeout: Optional[float]) -> bool:
+        self.cancel()
+        stop_timeout = int(timeout) if timeout is not None else None
+        return bool(self._postgresql.stop('immediate', checkpoint=False, stop_timeout=stop_timeout))
+
     def _dispatch(self, command: LifecycleCommand, events: EventChannel,
                   cancelled: Event, task: CriticalTask) -> Optional[bool]:
         role = _role(command.target_role)

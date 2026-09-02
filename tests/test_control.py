@@ -386,6 +386,19 @@ class TestSafetyState(unittest.TestCase):
 
         self.assertEqual(snapshot, self.state.snapshot)
 
+    def test_new_command_is_rejected_during_fence(self) -> None:
+        self.grant(lifetime=1)
+        self.state.observe(PostgresRole.PRIMARY)
+        self.clock.advance(1)
+        self.assertEqual(SafetyAction.FENCE, self.state.tick())
+
+        receipt = self.state.submit(self.command(
+            CommandKind.STOP, sequence=2, target=DesiredRole.UNCHANGED,
+        ))
+
+        self.assertEqual(SafetyAction.REJECT, receipt.action)
+        self.assertEqual(AgentState.FENCING, self.state.snapshot.agent_state)
+
     def test_boot_ids_are_canonical_uuids(self) -> None:
         noncanonical = str(UUID(self.agent_id)).upper()
 
