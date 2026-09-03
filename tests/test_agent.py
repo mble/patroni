@@ -31,6 +31,7 @@ class TestPatroniAgent(unittest.TestCase):
         with self.assertRaises(PatroniFatalException):
             _control_config({'agent': {'socket': 'agent.sock'}})
 
+    @patch('patroni.thread_pool.configure_global_pool')
     @patch('patroni.agent.AbstractPatroniDaemon.__init__')
     @patch('patroni.agent.UnixServer')
     @patch('patroni.agent.AgentRpc')
@@ -46,10 +47,11 @@ class TestPatroniAgent(unittest.TestCase):
     @patch('patroni.agent.AgentConfigManager')
     def test_agent_constructs_no_dcs_client(self, config_manager, update, get_mpp, watchdog, postgresql,
                                             recovery, replication, driver, commands, node, rpc,
-                                            server, daemon_init) -> None:
+                                            server, daemon_init, configure_pool) -> None:
         config = AgentConfig(
             postgresql={'name': 'node-a'},
             agent={'socket': '/run/patroni/agent.sock'},
+            thread_pool_size=7,
         )
 
         agent = PatroniAgent(config, Mock())
@@ -58,6 +60,7 @@ class TestPatroniAgent(unittest.TestCase):
         config_manager.assert_called_once_with(config, postgresql.return_value)
         self.assertEqual(node.return_value, agent.node)
         server.assert_called_once()
+        configure_pool.assert_called_once_with(7)
 
     @patch('patroni.agent.AbstractPatroniDaemon.__init__')
     def test_agent_requires_control_socket(self, daemon_init) -> None:

@@ -6,11 +6,13 @@ readonly WAIT_SECONDS=1
 readonly ETCD_TIMEOUT=1s
 readonly POSTGRES_PORT=55432
 readonly REST_PORT=58008
-readonly REPO_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
+REPO_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
+readonly REPO_DIR
 
 export PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
-readonly RUN_DIR="$(mktemp -d -t patroni-controller-agent.XXXXXX)"
+RUN_DIR="$(mktemp -d -t patroni-controller-agent.XXXXXX)"
+readonly RUN_DIR
 readonly SOCKET_PATH="${RUN_DIR}/agent.sock"
 readonly DATA_DIR="${RUN_DIR}/data"
 readonly AGENT_CONFIG="${RUN_DIR}/agent.yml"

@@ -287,6 +287,24 @@ def postgres() -> Mock:
 
 class TestLocalPostgresObserver(unittest.TestCase):
 
+    def test_stopped_primary_is_not_observed(self) -> None:
+        postgresql = postgres()
+        postgresql.state = PostgresqlState.STOPPED
+        postgresql.is_running.return_value = None
+
+        local_state = LocalPostgresObserver(postgresql).read(SnapshotDetail.BASIC)
+
+        self.assertEqual(PostgresRole.UNKNOWN, local_state.observed_role)
+        self.assertEqual(PostgresRole.PRIMARY, local_state.desired_role)
+
+    def test_live_primary_overrides_stopped_state(self) -> None:
+        postgresql = postgres()
+        postgresql.state = PostgresqlState.STOPPED
+
+        local_state = LocalPostgresObserver(postgresql).read(SnapshotDetail.BASIC)
+
+        self.assertEqual(PostgresRole.PRIMARY, local_state.observed_role)
+
     def test_invalidate_resets_postgres_cache(self) -> None:
         postgresql = postgres()
 

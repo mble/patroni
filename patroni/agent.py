@@ -7,7 +7,7 @@ from threading import Event
 from typing import Any, cast, Mapping, NamedTuple, Optional, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
-from patroni import global_config
+from patroni import global_config, thread_pool
 from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, \
     CommandKind, CommandState, DesiredRole, DivergencePolicy, InProcessNodeControl, \
     LifecycleCommand, PolicyMode, ReloadMode, StopMode, SubmitState
@@ -46,6 +46,7 @@ CONTROLLER_SECTIONS = frozenset((
     'restapi',
 ))
 SHUTDOWN_POLL_SECONDS = 0.05
+DEFAULT_THREAD_POOL_SIZE = 5
 
 
 class _ControlConfig(NamedTuple):
@@ -70,6 +71,16 @@ class PatroniAgent(AbstractPatroniDaemon):
         local_config = getattr(config, 'local_configuration', config)
         _reject_dcs(local_config)
         control_config = _control_config(config)
+
+        try:
+            pool_size = max(DEFAULT_THREAD_POOL_SIZE, int(
+                config.get('thread_pool_size', DEFAULT_THREAD_POOL_SIZE),
+            ))
+        except Exception as exc:
+            logger.warning('Invalid thread_pool_size: %r', exc)
+            pool_size = DEFAULT_THREAD_POOL_SIZE
+        thread_pool.configure_global_pool(pool_size)
+
         super().__init__(config, patroni_logger)
 
         self.agent_boot_id = str(uuid4())

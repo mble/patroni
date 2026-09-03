@@ -4,20 +4,20 @@ Date: 2026-09-03
 
 ## Correctness
 
-The full unit suite passes. Differential Unix tests compare direct and split
-node observations. Extended local Jepsen runs used a 15-minute fault phase and
-a two-minute final phase:
+The 885-test unit suite passes. Differential Unix tests compare direct and
+split node observations. Final-revision local Jepsen runs used a 15-minute
+fault phase and a two-minute final phase:
 
 | Topology | PostgreSQL | Seed | Result |
 |---|---:|---:|---|
 | Split | 13 | 17 | Valid history; no lost, unexpected, or overlapping writes |
 | Mixed | 17 | 43 | Valid history; no lost, unexpected, or overlapping writes |
-| Split | 18 | 29 | Valid after live-postmaster health remediation |
+| Split | 18 | 29 | Valid history; no lost, unexpected, or overlapping writes |
 
-The PostgreSQL 18 run first exposed a cached-state recovery defect. A regression
-test failed before the controller health check was changed to query the live
-postmaster. The identical campaign then passed. The final-revision CI matrix
-repeats all three campaigns.
+Qualification exposed cached health, stopped-primary observation, and missing
+agent thread-pool defects. Each remediation added a failing regression test
+before its fix. Clean images then passed all three campaigns and same-PGDATA
+rollout tests. CI repeats this matrix.
 
 The required CI matrix uses those durations and seeds. It retains histories,
 checker output, DCS state, and process logs. The merge ruleset must require
@@ -40,16 +40,18 @@ deny unauthenticated agent traffic to etcd independently of the controller.
 
 ## Performance
 
-Matched PostgreSQL 18 containers on the M00 host produced these qualification
-samples. They are not service-level objectives.
+Matched PostgreSQL 18 streaming replicas on the M00 host produced these
+qualification samples. PSS is the sum of Patroni-side processes. Idle CPU is a
+45-second process-time delta. REST results are 2,000 alternating requests from
+one container. These samples are not service-level objectives.
 
 | Sample | Monolithic | Split |
 |---|---:|---:|
-| Idle replica Patroni PSS | 36.7 MiB | 75.6 MiB |
-| Idle replica Patroni CPU | 0.31% core | 0.91% core |
-| REST `/patroni` p50 | 1.210 ms | 1.878 ms |
-| REST `/patroni` p95 | 1.658 ms | 2.939 ms |
-| REST `/patroni` p99 | 1.965 ms | 9.017 ms |
+| Idle replica Patroni PSS | 38.2 MiB | 75.2 MiB |
+| Idle replica Patroni CPU | 0.178% core | 0.733% core |
+| REST `/patroni` p50 | 1.084 ms | 1.796 ms |
+| REST `/patroni` p95 | 1.283 ms | 2.046 ms |
+| REST `/patroni` p99 | 1.468 ms | 2.418 ms |
 | Synchronous `pgbench` | 759.8 TPS | 954.6 TPS |
 
 The 5,000-call local control-socket sample measured 0.179 ms p50, 0.214 ms

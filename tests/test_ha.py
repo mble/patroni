@@ -1994,7 +1994,7 @@ class TestHa(PostgresInit):
     @patch('patroni.postgresql.mpp.AbstractMPPHandler.is_coordinator', Mock(return_value=False))
     def test_shutdown_citus_worker(self):
         self.ha.is_leader = true
-        self.p.is_running = Mock(side_effect=[Mock(), False])
+        self.p.is_running = Mock(side_effect=[Mock(), False, False, False])
         self.ha.patroni.request = Mock()
         self.ha.shutdown()
         self.ha.patroni.request.assert_called()

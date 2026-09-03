@@ -26,13 +26,14 @@ class LocalPostgresObserver(PostgresObserver):
 
     def read(self, detail: SnapshotDetail) -> LocalPostgres:
         """Read cached process state and bounded public metadata."""
-        role = PostgresRole(self._postgresql.role.value)
+        desired_role = PostgresRole(self._postgresql.role.value)
+        observed_role = desired_role if self._postgresql.is_running() else PostgresRole.UNKNOWN
         pending_restart = _pending_restart(self._postgresql.pending_restart_reason)
 
         return LocalPostgres(
             PostgresState(self._postgresql.state.value),
-            role,
-            role,
+            observed_role,
+            desired_role,
             self._postgresql.sysid,
             self._postgresql.supports_multiple_sync,
             pending_restart,
