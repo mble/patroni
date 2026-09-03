@@ -1,0 +1,60 @@
+name: Role images
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/role-images.yaml'
+      - 'kubernetes/controller-agent/**'
+      - 'patroni/**'
+      - 'scripts/integration/*role-images.sh'
+      - 'setup.py'
+  push:
+    branches:
+      - master
+      - controller-agent
+    paths:
+      - '.github/workflows/role-images.yaml'
+      - 'kubernetes/controller-agent/**'
+      - 'patroni/**'
+      - 'scripts/integration/*role-images.sh'
+      - 'setup.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build controller
+        run: docker build -f kubernetes/controller-agent/Dockerfile.controller -t patroni-controller:latest .
+
+      - name: Build agent
+        run: docker build -f kubernetes/controller-agent/Dockerfile.agent -t patroni-agent:latest .
+
+      - name: Pull agent base
+        run: docker pull postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+
+      - name: Check images
+        run: scripts/integration/check-role-images.sh
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
+        with:
+          version: v0.74.0
+          cache: true
+
+      - name: Scan images
+        run: scripts/integration/scan-role-images.sh
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: role-image-artifacts
+          path: role-image-artifacts
+          if-no-files-found: error
+          retention-days: 30

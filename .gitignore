@@ -36,6 +36,7 @@ junit.xml
 features/output*
 dummy
 result.json
+role-image-artifacts/
 
 # Translations
 *.mo

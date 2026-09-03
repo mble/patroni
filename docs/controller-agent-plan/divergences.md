@@ -200,12 +200,16 @@ than calling PostgreSQL objects.
 
 Split mode uses two containers in one Pod:
 
+- The controller uses a distroless role image without PostgreSQL or psycopg.
+- The agent uses an official PostgreSQL role image without DCS client packages.
 - A shared `emptyDir` contains only the control socket.
 - Only the agent mounts PGDATA and PostgreSQL secrets.
 - Only the controller mounts etcd credentials.
 - PostgreSQL runs in the agent container.
 - Public REST runs in the controller container.
 - PostgreSQL and REST retain their existing Pod network addresses.
+- Distinct UIDs, peer credential checks, and one shared socket GID bind roles.
+- Read-only roots, dropped capabilities, and runtime seccomp constrain both.
 
 Both containers share the Pod network namespace. Standard Kubernetes
 NetworkPolicy cannot isolate their egress separately. Credential and mount

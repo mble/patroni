@@ -2,8 +2,9 @@
 
 ## Configuration
 
-Run `dumb-init --single-child -- patroni-agent agent.yml` as PID 1 in the
-PostgreSQL container. Run `patroni-controller controller.yml` in the DCS
+The reference images provide fixed role entry points. Outside those images,
+run `dumb-init --single-child -- patroni-agent agent.yml` as PID 1 in the
+PostgreSQL container and `patroni-controller controller.yml` in the DCS
 container. Both processes need the same absolute Unix-socket path, scope, name,
 and Pod addresses. `patroni-agent-supervisor` remains a Python fallback.
 

@@ -1,0 +1,42 @@
+ARG BUILD_IMAGE=python:3.11-slim-bookworm@sha256:528257d48c1da0dcecc2e725d1ae34498d60c965f1241e39cd6a85a8859bdf84
+ARG RUNTIME_IMAGE=gcr.io/distroless/python3-debian12:nonroot@sha256:7d1042ce588ab97019fe95c24ffca7bc5a82ccdac572511d5e09bda4435c89c5
+
+FROM ${BUILD_IMAGE} AS build
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+WORKDIR /src
+
+COPY kubernetes/controller-agent/requirements-controller.lock /tmp/requirements.lock
+RUN python -m pip install \
+        --require-hashes \
+        --no-compile \
+        --no-deps \
+        --target /opt/patroni \
+        --requirement /tmp/requirements.lock
+
+COPY LICENSE README.rst requirements.txt setup.py /src/
+COPY patroni /src/patroni
+RUN python -m pip install \
+        --no-compile \
+        --no-deps \
+        --target /opt/patroni \
+        /src \
+    && rm -rf /opt/patroni/bin
+
+FROM ${RUNTIME_IMAGE}
+
+ARG RUNTIME_UID=65532
+ARG RUNTIME_GID=65532
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/patroni \
+    PYTHONUNBUFFERED=1
+WORKDIR /
+
+COPY --from=build --chown=${RUNTIME_UID}:${RUNTIME_GID} /opt/patroni /opt/patroni
+
+USER ${RUNTIME_UID}:${RUNTIME_GID}
+EXPOSE 8008
+ENTRYPOINT ["/usr/bin/python3", "-m", "patroni.controller"]
+CMD ["/etc/patroni/controller.yml"]

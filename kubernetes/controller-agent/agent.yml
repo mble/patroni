@@ -9,6 +9,7 @@ postgresql:
       username: replicator
   parameters:
     password_encryption: scram-sha-256
+    unix_socket_directories: /tmp
 
 bootstrap:
   initdb:
@@ -23,5 +24,7 @@ watchdog:
 agent:
   socket: /run/patroni/agent.sock
   socket_mode: 432
+  peer_uid: 65532
+  peer_gid: 65532
   timeout: 5
-  max_workers: 16
+  max_workers: 2

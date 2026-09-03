@@ -27,13 +27,14 @@ every matrix job.
 
 The example Pod shares only the control-socket volume. PGDATA and PostgreSQL
 secrets are agent-only; etcd TLS credentials are controller-only. Service
-account tokens are disabled. Both containers use UID/GID 999, read-only roots,
-bounded writable volumes, resource limits, and no Linux capabilities.
+account tokens are disabled. The agent uses UID/GID 999; the controller uses
+UID/GID 65532 plus socket GID 999. Both use read-only roots, bounded writable
+volumes, resource limits, no Linux capabilities, and `RuntimeDefault` seccomp.
 
 The local socket checks peer credentials, owner, mode, path type, and inode.
 Frames, collections, text, histories, workers, retries, and waits are bounded.
-The Jepsen image installs this checkout. No new base image or external runtime
-service is introduced.
+The reference now uses separate digest-pinned images. Exact dependency,
+metadata, size, SBOM, and vulnerability-delta gates run in CI.
 
 The remaining boundary limitation is Pod-wide networking: NetworkPolicy cannot
 deny unauthenticated agent traffic to etcd independently of the controller.

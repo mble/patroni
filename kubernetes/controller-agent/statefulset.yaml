@@ -51,15 +51,13 @@ spec:
       securityContext:
         fsGroup: 999
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: agent
-          image: patroni-controller-agent:latest
+          image: patroni-agent:latest
           imagePullPolicy: IfNotPresent
-          command:
-            - /usr/bin/dumb-init
-            - --single-child
-            - --
-            - patroni-agent
+          args:
             - /etc/patroni/agent.yml
           env:
             - name: POD_IP
@@ -132,10 +130,9 @@ spec:
               mountPath: /run/patroni
 
         - name: controller
-          image: patroni-controller-agent:latest
+          image: patroni-controller:latest
           imagePullPolicy: IfNotPresent
-          command:
-            - patroni-controller
+          args:
             - /etc/patroni/controller.yml
           env:
             - name: POD_IP
@@ -189,8 +186,8 @@ spec:
               drop: [ALL]
             readOnlyRootFilesystem: true
             runAsNonRoot: true
-            runAsUser: 999
-            runAsGroup: 999
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - name: controller-config
               mountPath: /etc/patroni
