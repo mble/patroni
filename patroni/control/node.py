@@ -44,6 +44,10 @@ class PostgresObserver(ABC):
         """Run the current REST status query."""
 
     @abstractmethod
+    def invalidate(self) -> None:
+        """Clear PostgreSQL monitoring state between HA cycles."""
+
+    @abstractmethod
     def replica_timeline(self, leader_timeline: Optional[int]) -> Optional[int]:
         """Resolve the cached replica timeline."""
 
@@ -329,6 +333,7 @@ class InProcessNodeControl(NodeControl):
     def invalidate(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._observer.invalidate()
 
     def close(self) -> None:
         if self._commands:

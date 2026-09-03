@@ -1,5 +1,7 @@
 # M09: Kubernetes and fault qualification
 
+Status: complete, 2026-09-03
+
 ## Goal
 
 Prove the split under real Pod lifecycle and network failures.
@@ -66,3 +68,12 @@ throughput with M00.
 The required Jepsen campaign and differential behaviour suite pass. Repeated
 fault runs produce no split brain, semantic regression, or unbounded resource
 use.
+
+## Result
+
+The two-container StatefulSet, socket-only shared volume, credential split,
+probes, resource bounds, and termination budget are in
+`kubernetes/controller-agent`. The socket trace test compares direct and split
+observations. The required Jepsen matrix covers split and mixed clusters with
+recorded seeds, combined process/network faults, write probes, and retained
+evidence. Repository branch protection must require its matrix jobs.

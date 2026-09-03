@@ -415,6 +415,8 @@ def main() -> None:
 def _config_revision(cluster: object) -> int:
     config = getattr(cluster, 'config', None)
     revision = getattr(config, 'modify_version', 0)
+    if isinstance(revision, str) and revision.isascii() and revision.isdigit():
+        revision = int(revision)
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
         raise PatroniFatalException('DCS configuration revision is invalid')
 

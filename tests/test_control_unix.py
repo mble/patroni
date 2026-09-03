@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, \
-    CloneMode, CommandKind, CommandState, ConfigApply, DesiredRole, DivergencePolicy, \
-    Freshness, ObservationContext, ObservationFailure, PostgresRole, SnapshotDetail, Timing
+    CloneMode, CommandKind, CommandState, ConfigApply, DesiredRole, DivergencePolicy, Freshness, \
+    ObservationContext, ObservationFailure, PostgresRole, SnapshotDetail, TimelineWal, Timing
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.commands import CommandResult, CommandSubmission, CommandValue, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
@@ -18,6 +18,17 @@ from patroni.control.config import config_plan
 from patroni.control.protocol import ErrorCode, ProtocolError
 from patroni.control.rpc import AgentClient, AgentRpc
 from patroni.control.unix import peer_check, UnixServer
+
+
+def observation_trace(node):
+    return (
+        node.is_running(),
+        node.is_primary(),
+        node.last_operation(),
+        node.timeline_wal(),
+        node.slots(),
+        node.checkpoint_locations(),
+    )
 
 
 def allow_peer(stream):
@@ -42,6 +53,11 @@ class TestControlUnix(unittest.TestCase):
         self.path = str(self.directory / 'agent.sock')
         self.node = Mock()
         self.node.is_running.return_value = True
+        self.node.is_primary.return_value = False
+        self.node.last_operation.return_value = 42
+        self.node.timeline_wal.return_value = TimelineWal(3, 42, 3, 40, 41)
+        self.node.slots.return_value = {'replica': 41}
+        self.node.checkpoint_locations.return_value = (42, 40)
         self.monitor = AuthorityMonitor()
         self.config_sink = Mock(return_value=ConfigApply.APPLIED)
         self.rpc = AgentRpc(
@@ -60,6 +76,14 @@ class TestControlUnix(unittest.TestCase):
 
         self.assertTrue(client.is_running())
         self.node.is_running.assert_called_once_with()
+
+    def test_direct_and_split_traces_match(self) -> None:
+        direct = observation_trace(self.node)
+        self.server.start()
+
+        split = observation_trace(AgentClient(self.path, peer_check=allow_peer))
+
+        self.assertEqual(direct, split)
 
     def test_authority_grant_uses_transport_sequence(self) -> None:
         self.server.start()

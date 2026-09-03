@@ -1,59 +1,85 @@
 name: Jepsen tests
 
 on:
-#  schedule:
-#  - cron: '0 0 * * *'
+  pull_request:
+    paths:
+      - '.github/workflows/jepsen.yaml'
+      - 'jepsen/**'
+      - 'patroni/**'
+      - 'setup.py'
 
-  # Allow manual triggering with a branch input
   workflow_dispatch:
-    inputs:
-      branch:
-        description: 'Branch to run Jepsen tests on'
-        required: true
-        default: 'master'
 
 jobs:
   jepsen:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - topology: split
+            seed: 17
+            postgres: 13
+            compose: jepsen/docker-compose.yml
+          - topology: split
+            seed: 29
+            postgres: 18
+            compose: jepsen/docker-compose.yml
+          - topology: mixed
+            seed: 43
+            postgres: 17
+            compose: jepsen/docker-compose.yml:jepsen/docker-compose-mixed.yml
     env:
-      BRANCH: ${{ github.event.inputs.branch || 'master' }}
+      COMPOSE_FILE: ${{ matrix.compose }}
+      PG_MAJOR: ${{ matrix.postgres }}
+      JEPSEN_SEED: ${{ matrix.seed }}
+      JEPSEN_TIME_LIMIT: 900
+      JEPSEN_FINAL_TIME_LIMIT: 120
+      JEPSEN_RECOVERY_SECONDS: 30
+      JEPSEN_RUN_TIMEOUT: 2400
     steps:
     - name: Checkout
       uses: actions/checkout@v5
 
-    - name: Validate branch
-      run: git ls-remote --exit-code origin "refs/heads/$BRANCH" || (echo "Branch $BRANCH does not exist" && exit 1)
-
     - name: Run test
       run: |
-        cd jepsen
-        docker compose build --build-arg "BRANCH=$BRANCH"
+        docker compose build
         docker compose up -d
-        mkdir -p logs
-        (
-          cd logs
-          if ! docker exec jepsen-test bash run.sh > jepsen.log 2>&1; then
-            tail -n 18 jepsen.log
-            for name in $(docker ps --filter "name=jepsen-[^t]" --format "{{.Names}}"); do
-              docker logs "$name" > "${name#jepsen-}.log"
-            done
-            for name in $(docker ps --filter "name=jepsen-patroni" --format "{{.Names}}"); do
-              docker exec "$name" sh -c 'cat $PGDATA/log/postgres.log' > "${name#jepsen-}-postgres.log"
-              docker exec "$name" sh -c 'cat $PGDATA/log/postgres.csv' > "${name#jepsen-}-postgres.csv"
-            done
-            docker exec "$name" patronictl list > patronictl.log
-            docker exec "$name" patronictl history >> patronictl.log
-            exit 1
-          fi
-          tail -n 4 jepsen.log
-        )
-        docker compose down --rmi all
+        mkdir -p jepsen/logs
+        docker exec jepsen-test bash run.sh 2>&1 | tee jepsen/logs/jepsen.log
 
-    - name: Upload logs if Jepsen test failed
+    - name: Collect evidence
+      if: always()
+      run: |
+        mkdir -p jepsen/logs
+        docker cp jepsen-test:/root/jepsen/store jepsen/logs/store || true
+        for name in jepsen-etcd1 jepsen-etcd2 jepsen-etcd3 \
+                    jepsen-patroni1 jepsen-patroni2 jepsen-patroni3; do
+          docker logs "$name" > "jepsen/logs/${name#jepsen-}.log" 2>&1 || true
+        done
+        for name in jepsen-patroni1 jepsen-patroni2 jepsen-patroni3; do
+          docker exec "$name" sh -c 'cat $PGDATA/log/postgres.log' \
+            > "jepsen/logs/${name#jepsen-}-postgres.log" 2>&1 || true
+          docker exec "$name" sh -c 'cat $PGDATA/log/postgres.csv' \
+            > "jepsen/logs/${name#jepsen-}-postgres.csv" 2>&1 || true
+        done
+        docker exec jepsen-etcd1 etcdctl get --prefix /service/jepsen \
+          > jepsen/logs/dcs.log 2>&1 || true
+        docker exec jepsen-patroni1 patronictl list \
+          > jepsen/logs/patronictl.log 2>&1 || true
+        docker exec jepsen-patroni1 patronictl history \
+          >> jepsen/logs/patronictl.log 2>&1 || true
+
+    - name: Stop cluster
+      if: always()
+      run: docker compose down --rmi all
+
+    - name: Upload evidence
       uses: actions/upload-artifact@v4
-      if: failure()
+      if: always()
       with:
-        name: jepsen-logs
+        name: jepsen-evidence-${{ matrix.topology }}-pg${{ matrix.postgres }}-${{ matrix.seed }}
         path: jepsen/logs
         if-no-files-found: error
-        retention-days: 5
+        retention-days: 14

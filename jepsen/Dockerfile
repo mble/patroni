@@ -1,7 +1,6 @@
 ARG PG_MAJOR=17
 ARG PGHOME=/home/postgres
 ARG DEBIAN_FRONTEND=noninteractive
-ARG BRANCH=master
 
 FROM postgres:$PG_MAJOR AS base
 
@@ -38,25 +37,37 @@ ENTRYPOINT ["/usr/bin/runsvdir", "-P", "/etc/service"]
 
 FROM base AS etcd
 RUN apt-get install -y etcd-server
-COPY runit/etcd /etc/service/etcd
+COPY jepsen/runit/etcd /etc/service/etcd
 
 
 FROM base AS patroni
 
-ARG BRANCH PGHOME PG_MAJOR DEBIAN_FRONTEND
+ARG PGHOME PG_MAJOR DEBIAN_FRONTEND
 ARG PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin
 
 RUN apt-cache depends patroni | sed -n -e 's/.* Depends: \(python3-.\+\)$/\1/p' \
             | grep -Ev '^python3-(sphinx|etcd|consul|kazoo|kubernetes|psycopg)' \
-            | xargs apt-get install -y  python3-pip python3-wheel python3-setuptools python3-etcd \
-    && pip3 install --break-system-packages "git+https://github.com/patroni/patroni.git@${BRANCH}#egg=patroni[psycopg3]" && \
-    mkdir -p ~/.config/patroni && \
-    ln -s /home/postgres/patroni.yml ~/.config/patroni/patronictl.yaml
+            | xargs apt-get install -y python3-pip python3-wheel python3-setuptools python3-etcd
 
-COPY runit/patroni /etc/service/patroni
+COPY . /src
+
+RUN pip3 install --break-system-packages '/src[psycopg3]' && \
+    mkdir -p ~/.config/patroni && \
+    ln -s /home/postgres/controller.yml ~/.config/patroni/patronictl.yaml
+
+COPY jepsen/runit/agent /etc/service/patroni-agent
+COPY jepsen/runit/controller /etc/service/patroni-controller
 
 ENV PGHOME=$PGHOME PGDATA=$PGHOME/data PATH=$PATH:$PGBIN
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 EDITOR=/usr/bin/editor
+
+
+FROM patroni AS patroni-monolith
+
+RUN rm -rf /etc/service/patroni-agent /etc/service/patroni-controller && \
+    ln -sfn /home/postgres/patroni.yml /root/.config/patroni/patronictl.yaml
+
+COPY jepsen/runit/patroni /etc/service/patroni
 
 
 FROM base AS jepsen
@@ -65,7 +76,7 @@ RUN apt-get install -y libjna-java default-jre-headless && \
     curl -sL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein > /usr/bin/lein && \
     chmod +x /usr/bin/lein
 
-COPY jepsen /root/jepsen
+COPY jepsen/jepsen /root/jepsen
 WORKDIR /root/jepsen
 
 ENV LEIN_ROOT=1

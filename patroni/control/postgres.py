@@ -74,6 +74,10 @@ class LocalPostgresObserver(PostgresObserver):
 
         return rows[0]
 
+    def invalidate(self) -> None:
+        """Clear Patroni's local monitoring query cache."""
+        self._postgresql.reset_cluster_info_state(None)
+
     def replica_timeline(self, leader_timeline: Optional[int]) -> Optional[int]:
         """Use Patroni's current replica timeline cache."""
         return self._postgresql.replica_cached_timeline(leader_timeline)

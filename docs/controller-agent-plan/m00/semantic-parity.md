@@ -21,10 +21,10 @@ restated here.
 | Replica methods | Configured method order and documented arguments select clone behavior | Same order, arguments, exit handling, and `no_leader` behavior | replica bootstrap docs and features |
 | Callbacks | Action, role, scope, ordering, and cancellation follow current executor behavior | Agent runs callbacks with the same documented contract | `callback_executor.py`; feature callback checks |
 | Rewind | Timeline checks, credential use, divergence removal, and fallback remain local | Controller requests intent only; agent reproduces outcomes | `rewind.py`; basic replication feature |
-| Slots and sync | HA policy and local SQL/files jointly maintain state | Controller plans; agent applies; DCS and PostgreSQL states match | slots, sync, and replication features |
+| Slots and sync | HA policy and local SQL/files jointly maintain state | Controller plans; agent applies; DCS and PostgreSQL states match | control replication tests; Jepsen sync campaign |
 | Process model | Postmaster is orphaned to init and later found through the PID file | Agent uses the same helper, orphaning, discovery, and adoption | `postmaster.py`, `postgresql/__init__.py` |
-| Agent loss | No current separate process exists | Stop renewal; never delete leader without stop/fence proof; container exits | split fault tests and Jepsen gate |
-| Controller loss | No current separate process exists | Active mode follows current DCS-loss path; paused mode preserves state | split fault tests and Jepsen gate |
+| Agent loss | No current separate process exists | Stop renewal; never delete leader without stop/fence proof; container exits | authority tests and Jepsen gate |
+| Controller loss | No current separate process exists | Active mode follows current DCS-loss path; paused mode preserves state | authority tests and Jepsen gate |
 
 ## Required terminal assertions
 

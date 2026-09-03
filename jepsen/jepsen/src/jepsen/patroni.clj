@@ -19,6 +19,33 @@
 
 (def register (atom 0))
 
+(def default-seed 17)
+(def default-time-limit 7200)
+(def default-final-time-limit 600)
+(def default-recovery-seconds 60)
+(def primary-probe-sql
+  "BEGIN; CREATE TEMP TABLE patroni_primary_probe(value integer); SELECT pg_sleep(1); ROLLBACK")
+
+(defn env-long [name fallback]
+  (Long/parseLong (or (System/getenv name) (str fallback))))
+
+(def test-seed (env-long "JEPSEN_SEED" default-seed))
+(def test-random (java.util.Random. test-seed))
+(def test-time-limit (env-long "JEPSEN_TIME_LIMIT" default-time-limit))
+(def final-time-limit (env-long "JEPSEN_FINAL_TIME_LIMIT" default-final-time-limit))
+(def recovery-seconds (env-long "JEPSEN_RECOVERY_SECONDS" default-recovery-seconds))
+
+(defn choose [values]
+  (let [items (vec values)]
+    (locking test-random
+      (nth items (.nextInt test-random (count items))))))
+
+(defn patroni-node [test]
+  (choose (filter #(string/includes? (name %) "patroni") (:nodes test))))
+
+(defn patroni-nodes [test]
+  (filter #(string/includes? (name %) "patroni") (:nodes test)))
+
 (defn open-conn
   "Given a JDBC connection spec, opens a new connection unless one already
   exists. JDBC represents open connections as a map with a :connection key.
@@ -172,30 +199,105 @@
              :lost-frac       (util/fraction (count lost) (count attempts))
              :recovered-frac  (util/fraction (count recovered) (count attempts))}))))))
 
-(defn killer
-  "Executes pkill -9 `procname`"
+(defn- overlap? [left right]
+  (< (max (:start left) (:start right))
+     (min (:end left) (:end right))))
+
+(def primary-overlap
+  "Reject concurrent successful write probes on different nodes."
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [overlaps (for [event history
+                           :when (and (= :probe-primary (:f event))
+                                      (= :info (:type event)))
+                           left (:value event)
+                           right (:value event)
+                           :when (neg? (compare (:node left) (:node right)))
+                           :when (overlap? left right)]
+                       [(:node left) (:node right)])]
+        {:valid? (empty? overlaps)
+         :overlaps (vec overlaps)}))))
+
+(defn- probe-node [node]
+  (let [start (System/nanoTime)]
+    (try
+      (control/on node
+        (control/exec :timeout :4 :psql :-U :postgres :-v :ON_ERROR_STOP=1
+                      :-Atqc primary-probe-sql))
+      {:node (name node) :start start :end (System/nanoTime)}
+      (catch Throwable t#
+        nil))))
+
+(defn- probe-primaries [test]
+  ; A successful one-second transaction proves the node stayed writable.
+  (->> (patroni-nodes test)
+       (pmap probe-node)
+       (filter some?)
+       (vec)))
+
+(defn- try-exec [& command]
+  (try
+    (apply control/exec command)
+    (catch Throwable t#
+      (debug (str "Process command had no target: " (.getMessage t#)))
+      nil)))
+
+(defn apply-process-fault [node fault]
+  (control/on node
+    (case fault
+      :kill-controller
+        (try-exec :pkill :-9 :-f "patroni.controller")
+      :kill-agent
+        (do (try-exec :pkill :-9 :-x "postgres")
+            (try-exec :pkill :-9 :-f "patroni.agent"))
+      :kill-postgres
+        (try-exec :pkill :-9 :-x "postgres")
+      :pause-controller
+        (try-exec :pkill :-STOP :-f "patroni.controller")
+      :pause-agent
+        (do (try-exec :pkill :-STOP :-x "postgres")
+            (try-exec :pkill :-STOP :-f "patroni.agent"))
+      :pause-postgres
+        (try-exec :pkill :-STOP :-x "postgres")
+      :drop-socket
+        (do (try-exec :rm :-f "/run/patroni/agent.sock")
+            (try-exec :pkill :-9 :-x "postgres")
+            (try-exec :pkill :-9 :-f "patroni.agent"))
+      :restart-pod
+        (do (try-exec :pkill :-9 :-f "patroni.controller")
+            (try-exec :pkill :-9 :-x "postgres")
+            (try-exec :pkill :-9 :-f "patroni.agent"))
+      :resume-processes
+        (do (try-exec :pkill :-CONT :-f "patroni.controller")
+            (try-exec :pkill :-CONT :-x "postgres")
+            (try-exec :pkill :-CONT :-f "patroni.agent")))))
+
+(defn process-faults
+  "Fault controller, agent-container, PostgreSQL, and socket boundaries."
   []
   (reify nemesis/Nemesis
     (setup! [this test]
       this)
     (invoke! [this test op]
-             (case (:f op)
-               :kill (assoc op :value
-                            (try
-                              (let [procname (rand-nth [:postgres
-                                                        :patroni])
-                                    node (rand-nth (filter (fn [x] (string/includes? (name x) "patroni"))
-                                                           (:nodes test)))]
-                                (control/on node
-                                  (control/exec :pkill :-9 :-f procname))
-                                (assoc op :value [:killed procname :on node]))
-                              (catch Throwable t#
-                                (let [m# (.getMessage t#)]
-                                  (do (warn (str "Unable to run pkill: "
-                                                 m#))
-                                      m#)))))))
+      (if (= :probe-primary (:f op))
+        (assoc op :value (probe-primaries test))
+        (assoc op :value
+          (try
+            (let [fault (:f op)
+                  nodes (if (= fault :resume-processes)
+                          (patroni-nodes test)
+                          [(patroni-node test)])]
+              (doseq [node nodes]
+                (apply-process-fault node fault))
+              [fault :on nodes])
+            (catch Throwable t#
+              (let [message (.getMessage t#)]
+                (warn (str "Unable to apply process fault: " message))
+                message))))))
     (teardown! [this test]
-      (info (str "Stopping killer")))
+      (doseq [node (patroni-nodes test)]
+        (apply-process-fault node :resume-processes))
+      (info "Stopping process faults"))
     nemesis/Reflection
     (fs [this] #{})))
 
@@ -209,8 +311,7 @@
              (case (:f op)
                :switch (assoc op :value
                           (try
-                              (let [node (rand-nth (filter (fn [x] (string/includes? (name x) "patroni"))
-                                                           (:nodes test)))]
+                              (let [node (patroni-node test)]
                                 (control/on node
                                   (control/exec :timeout :10 :patronictl :switchover :--force))
                                 (assoc op :value [:switchover :on node]))
@@ -224,7 +325,19 @@
     nemesis/Reflection
     (fs [this] #{})))
 
-(def nemesis-starts [:start-halves :start-ring :start-one :switch :kill])
+(def nemesis-starts
+  [:start-halves
+   :start-ring
+   :start-one
+   :switch
+   :kill-controller
+   :kill-agent
+   :kill-postgres
+   :pause-controller
+   :pause-agent
+   :pause-postgres
+   :drop-socket
+   :restart-pod])
 
 (defn patroni-test
   [patroni-nodes etcd-nodes]
@@ -241,24 +354,33 @@
                                  ; All partitioners heal all nodes on stop so we define stop once
                                  :stop         :stop} (nemesis/partition-random-node)
                                 #{:switch} (switcher)
-                                #{:kill} (killer)})
+                                #{:kill-controller :kill-agent :kill-postgres
+                                  :pause-controller :pause-agent :pause-postgres
+                                  :drop-socket :restart-pod :resume-processes
+                                  :probe-primary} (process-faults)})
    :generator (gen/phases
                 (->> a
                      (gen/stagger 1/50)
                      (gen/nemesis
                        (fn [] (map gen/once
-                                    [{:type :info, :f (rand-nth nemesis-starts)}
-                                     {:type :info, :f (rand-nth nemesis-starts)}
-                                     {:type :sleep, :value 60}
+                                    [{:type :info, :f (choose nemesis-starts)}
+                                     {:type :info, :f (choose nemesis-starts)}
+                                     {:type :info, :f :probe-primary}
+                                     {:type :sleep, :value recovery-seconds}
+                                     {:type :info, :f :probe-primary}
+                                     {:type :info, :f :resume-processes}
                                      {:type :info, :f :stop}
-                                     {:type :sleep, :value 60}])))
-                     (gen/time-limit 7200))
+                                     {:type :sleep, :value recovery-seconds}])))
+                     (gen/time-limit test-time-limit))
                 (->> r
                      (gen/stagger 1)
                      (gen/nemesis
                        (fn [] (map gen/once
                                     [{:type :info, :f :stop}
-                                     {:type :sleep, :value 60}])))
-                     (gen/time-limit 600)))
-   :checker   patroni-set
+                                     {:type :info, :f :resume-processes}
+                                     {:type :info, :f :probe-primary}
+                                     {:type :sleep, :value recovery-seconds}])))
+                     (gen/time-limit final-time-limit)))
+   :checker   (checker/compose {:history patroni-set
+                                :writable-primary primary-overlap})
    :remote    control/ssh})

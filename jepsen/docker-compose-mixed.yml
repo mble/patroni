@@ -1,0 +1,5 @@
+services:
+  patroni1:
+    build:
+      target: patroni-monolith
+    image: jepsen-patroni-monolith:latest

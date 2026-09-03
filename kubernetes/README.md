@@ -1,6 +1,9 @@
 # Kubernetes deployment examples
 Below you will find examples of Patroni deployments using [kind](https://kind.sigs.k8s.io/).
 
+The [controller-agent example](controller-agent/README.md) separates etcd and
+PostgreSQL credentials between two containers in each Pod.
+
 # Patroni on K8s
 The Patroni cluster deployment with a StatefulSet consisting of three Pods.
 

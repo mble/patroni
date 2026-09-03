@@ -1,0 +1,83 @@
+#!/bin/bash
+
+exec 2>&1
+
+readonly AGENT_SOCKET=/run/patroni/agent.sock
+readonly AGENT_CONFIG="$PGHOME/agent.yml"
+readonly AGENT_DIR=/run/patroni
+
+PATRONI_REPLICATION_USERNAME="${PATRONI_REPLICATION_USERNAME:-replicator}"
+PATRONI_REPLICATION_PASSWORD="${PATRONI_REPLICATION_PASSWORD:-replicate}"
+PATRONI_REWIND_USERNAME="${PATRONI_REWIND_USERNAME:-rewind}"
+PATRONI_REWIND_PASSWORD="${PATRONI_REWIND_PASSWORD:-rewind}"
+PATRONI_SUPERUSER_USERNAME="${PATRONI_SUPERUSER_USERNAME:-postgres}"
+PATRONI_SUPERUSER_PASSWORD="${PATRONI_SUPERUSER_PASSWORD:-postgres}"
+
+mkdir -p "$AGENT_DIR"
+chown postgres:postgres "$AGENT_DIR"
+
+cat > "$AGENT_CONFIG" <<__EOF__
+scope: '${PATRONI_SCOPE:-demo}'
+name: '$HOSTNAME'
+postgresql:
+  connect_address: '$(hostname --ip-address):5432'
+  listen: '*:5432'
+  data_dir: '${PATRONI_POSTGRESQL_DATA_DIR:-$PGDATA}'
+  use_unix_socket: true
+  use_unix_socket_repl: true
+  authentication:
+    superuser:
+      username: '$PATRONI_SUPERUSER_USERNAME'
+      password: '$PATRONI_SUPERUSER_PASSWORD'
+    replication:
+      username: '$PATRONI_REPLICATION_USERNAME'
+      password: '$PATRONI_REPLICATION_PASSWORD'
+    rewind:
+      username: '$PATRONI_REWIND_USERNAME'
+      password: '$PATRONI_REWIND_PASSWORD'
+  basebackup:
+    checkpoint: fast
+  parameters:
+    shared_buffers: 4MB
+    logging_collector: 'on'
+    log_destination: csvlog
+    log_directory: log
+    log_filename: postgres.log
+    archive_mode: 'on'
+    archive_timeout: 30
+    archive_command: 'rsync -e "ssh -o ConnectTimeout=1" --timeout=3 -a %p test:$PGHOME/archive/%f'
+    restore_command: 'rsync -a test:$PGHOME/archive/%f %p'
+  pg_hba:
+    - local all all trust
+    - local replication all trust
+    - host all all all md5
+    - host replication $PATRONI_REPLICATION_USERNAME all md5
+bootstrap:
+  initdb:
+    - auth-host: md5
+    - auth-local: trust
+    - encoding: UTF8
+    - locale: en_US.UTF-8
+    - data-checksums
+watchdog:
+  mode: off
+agent:
+  socket: '$AGENT_SOCKET'
+  socket_mode: 432
+  timeout: 5
+  max_workers: 16
+__EOF__
+
+if [ ! -s "$PGHOME/.ssh/known_hosts" ]; then
+    for _ in {1..10}; do
+        ssh-keyscan -t rsa test > "$PGHOME/.ssh/known_hosts" && break
+        sleep 1
+    done
+fi
+[ -s "$PGHOME/.ssh/known_hosts" ] || exit 1
+chown postgres:postgres "$PGHOME/.ssh/known_hosts"
+
+unset PATRONI_ETCD3_HOSTS ETCDCTL_ENDPOINTS
+unset PATRONI_REPLICATION_PASSWORD PATRONI_REWIND_PASSWORD PATRONI_SUPERUSER_PASSWORD
+
+exec chpst -u postgres env HOME="$PGHOME" patroni-agent-supervisor "$AGENT_CONFIG"

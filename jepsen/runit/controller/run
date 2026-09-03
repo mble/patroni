@@ -1,0 +1,55 @@
+#!/bin/bash
+
+exec 2>&1
+
+readonly AGENT_SOCKET=/run/patroni/agent.sock
+readonly CONTROLLER_CONFIG="$PGHOME/controller.yml"
+readonly SOCKET_WAIT_ATTEMPTS=60
+
+PATRONI_RESTAPI_USERNAME="${PATRONI_RESTAPI_USERNAME:-admin}"
+PATRONI_RESTAPI_PASSWORD="${PATRONI_RESTAPI_PASSWORD:-admin}"
+
+for ((attempt = 0; attempt < SOCKET_WAIT_ATTEMPTS; attempt++)); do
+    [ -S "$AGENT_SOCKET" ] && break
+    sleep 1
+done
+[ -S "$AGENT_SOCKET" ] || exit 1
+
+cat > "$CONTROLLER_CONFIG" <<__EOF__
+scope: '${PATRONI_SCOPE:-demo}'
+name: '$HOSTNAME'
+restapi:
+  connect_address: '$(hostname --ip-address):8008'
+  listen: '*:8008'
+  authentication:
+    username: '$PATRONI_RESTAPI_USERNAME'
+    password: '$PATRONI_RESTAPI_PASSWORD'
+etcd3:
+  hosts: '${PATRONI_ETCD3_HOSTS}'
+postgresql:
+  connect_address: '$(hostname --ip-address):5432'
+controller:
+  socket: '$AGENT_SOCKET'
+  timeout: 5
+watchdog:
+  mode: off
+bootstrap:
+  dcs:
+    failsafe_mode: on
+    synchronous_mode: quorum
+    synchronous_mode_strict: on
+    check_timeline: on
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        wal_sender_timeout: 30000
+      pg_hba:
+        - local all all trust
+        - local replication all trust
+        - host all all all md5
+        - host replication replicator all md5
+__EOF__
+
+unset PATRONI_RESTAPI_PASSWORD
+
+exec chpst -u postgres env HOME="$PGHOME" patroni-controller "$CONTROLLER_CONFIG"

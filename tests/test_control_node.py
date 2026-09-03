@@ -30,6 +30,7 @@ class FakeObserver(PostgresObserver):
         self.row = row
         self.query_modes = []
         self.query_error = None
+        self.invalidations = 0
         self.password = 'must-not-cross'
         self.dsn = 'postgres://secret@localhost/postgres'
 
@@ -45,6 +46,9 @@ class FakeObserver(PostgresObserver):
             raise self.query_error
 
         return self.row
+
+    def invalidate(self):
+        self.invalidations += 1
 
     def replica_timeline(self, leader_timeline):
         return leader_timeline or 2
@@ -209,6 +213,7 @@ class TestInProcessNodeControl(unittest.TestCase):
 
         self.assertIsNot(first, second)
         self.assertEqual(2, len(self.observer.query_modes))
+        self.assertEqual(1, self.observer.invalidations)
 
     def test_fresh_snapshot_requeries(self) -> None:
         first = self.snapshot()
@@ -281,6 +286,13 @@ def postgres() -> Mock:
 
 
 class TestLocalPostgresObserver(unittest.TestCase):
+
+    def test_invalidate_resets_postgres_cache(self) -> None:
+        postgresql = postgres()
+
+        LocalPostgresObserver(postgresql).invalidate()
+
+        postgresql.reset_cluster_info_state.assert_called_once_with(None)
 
     def test_status_requires_heartbeat_connection(self) -> None:
         postgresql = postgres()

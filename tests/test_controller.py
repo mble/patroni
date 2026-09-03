@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from patroni.config import Config
 from patroni.control import AuthorityKind, PostgresRole, PostgresState
-from patroni.controller import _controller_config, ControllerPostgresql, PatroniController
+from patroni.controller import _config_revision, _controller_config, ControllerPostgresql, PatroniController
 from patroni.dcs import Cluster
 from patroni.exceptions import PatroniFatalException
 from patroni.postgresql.misc import PostgresqlRole, PostgresqlState
@@ -14,6 +14,11 @@ from patroni.postgresql.mpp import Null
 
 
 class TestControllerConfig(unittest.TestCase):
+
+    def test_accepts_decimal_dcs_revision(self) -> None:
+        cluster = Mock(config=Mock(modify_version='123'))
+
+        self.assertEqual(123, _config_revision(cluster))
 
     def test_real_config_needs_no_agent_private_values(self) -> None:
         document = """

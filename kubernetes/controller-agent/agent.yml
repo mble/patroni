@@ -1,0 +1,27 @@
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/data
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+    replication:
+      username: replicator
+  parameters:
+    password_encryption: scram-sha-256
+
+bootstrap:
+  initdb:
+    - auth-host: scram-sha-256
+    - auth-local: trust
+    - data-checksums
+    - encoding: UTF8
+
+watchdog:
+  mode: off
+
+agent:
+  socket: /run/patroni/agent.sock
+  socket_mode: 432
+  timeout: 5
+  max_workers: 16
