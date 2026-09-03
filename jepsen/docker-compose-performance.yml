@@ -1,0 +1,12 @@
+services:
+  patroni1:
+    environment:
+      PATRONI_LOG_LEVEL: DEBUG
+
+  patroni2:
+    environment:
+      PATRONI_LOG_LEVEL: DEBUG
+
+  patroni3:
+    environment:
+      PATRONI_LOG_LEVEL: DEBUG

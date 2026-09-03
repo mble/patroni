@@ -35,3 +35,15 @@ system identifier.
 Set `JEPSEN_SEED`, `JEPSEN_TIME_LIMIT`, `JEPSEN_FINAL_TIME_LIMIT`,
 `JEPSEN_RECOVERY_SECONDS`, or `JEPSEN_RUN_TIMEOUT` to reproduce a run. The
 repository ruleset must require all `Jepsen tests / jepsen` matrix jobs.
+
+## Performance qualification
+
+`docker-compose-monolith.yml` makes all three Patroni members monolithic.
+`docker-compose-performance.yml` enables debug logs for HA-cycle extraction.
+Run each pure topology with PostgreSQL 18, then set `ttl=20`, `loop_wait=1`,
+and `retry_timeout=3` through `patronictl edit-config`.
+
+`docker exec jepsen-test bash performance.sh` runs three warmups and 30 measured
+switchovers and failovers. It waits for one leader and two streaming quorum
+standbys between samples. `ha-cycle.awk` extracts milliseconds from each debug
+`Lock owner` line through its HA result line.
