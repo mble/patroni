@@ -65,9 +65,9 @@ next request.
 | Replica HA cycle p95 | 125 ms | 133 ms | +6.4% | Pass |
 | Switchover p95 | 3,081.450 ms | 3,078.330 ms | -0.1% | Pass |
 | Failover p95 | 3,080.702 ms | 3,081.058 ms | +0.01% | Pass |
-| REST `/patroni` p95 | 1.283 ms | 2.046 ms | +59.5% | Approval required |
-| Idle Patroni RSS | 41.7 MiB | 81.7 MiB | +95.9% | Approval required |
-| Idle Patroni CPU | 0.178% | 0.733% | +311.8% | Approval required |
+| REST `/patroni` p95 | 1.283 ms | 2.046 ms | +59.5% | Accepted |
+| Idle Patroni RSS | 41.7 MiB | 81.7 MiB | +95.9% | Accepted |
+| Idle Patroni CPU | 0.178% | 0.733% | +311.8% | Accepted |
 
 | Operation | Topology | n | Min (ms) | p50 (ms) | p95 (ms) | p99 (ms) | Max (ms) | Mean (ms) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -82,5 +82,5 @@ HA loop interval.
 
 The split adds one controller interpreter and a small PID-1 supervisor. Removing
 the supervisor's configuration imports reduced its PSS to 6.8 MiB. HA-cycle,
-failover, and switchover gates pass. Memory, idle CPU, and REST costs require
-explicit acceptance before M10 closes.
+failover, and switchover gates pass. Memory, idle CPU, and REST costs were
+accepted for this fork on 2026-09-03.

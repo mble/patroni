@@ -1,6 +1,6 @@
 # M10: Parity, rollout, and rollback
 
-Status: pending performance acceptance
+Status: complete, 2026-09-03
 
 ## Goal
 
@@ -60,6 +60,6 @@ Configuration, feature status, rollout, rollback, and qualification evidence
 are published under `docs/controller-agent-plan`. Monolithic Patroni remains
 available. Final-revision PostgreSQL 13 split, PostgreSQL 18 split, and
 PostgreSQL 17 mixed campaigns pass locally with same-PGDATA rollout. The matrix
-is a required merge gate. Wire-version skew fails closed. M10 awaits acceptance
-of the measured process and REST overhead. HA-cycle, failover, and switchover
-latency gates pass.
+is a required merge gate. Wire-version skew fails closed. HA-cycle, failover,
+and switchover latency gates pass. The measured process and REST overhead was
+accepted for this fork on 2026-09-03.
