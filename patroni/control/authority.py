@@ -21,19 +21,22 @@ class AuthorityMonitor:
         self._interval = interval
         self._guard: Optional[Callable[[], SafetyAction]] = None
         self._fence: Optional[Callable[[], None]] = None
+        self._schedule: Optional[Callable[[], Optional[float]]] = None
         self._lock = RLock()
         self._wake = Event()
         self._closed = Event()
         self._thread: Optional[Thread] = None
         self._fencing = False
 
-    def bind(self, guard: Callable[[], SafetyAction], fence: Callable[[], None]) -> None:
+    def bind(self, guard: Callable[[], SafetyAction], fence: Callable[[], None],
+             schedule: Optional[Callable[[], Optional[float]]] = None) -> None:
         """Install the transport-owned safety callbacks once."""
         with self._lock:
             if self._guard is not None:
                 raise RuntimeError('authority monitor is already bound')
             self._guard = guard
             self._fence = fence
+            self._schedule = schedule
         self._wake.set()
 
     def start(self) -> None:
@@ -57,10 +60,25 @@ class AuthorityMonitor:
             thread.join(1)
 
     def _run(self) -> None:
+        delay: Optional[float] = 0.0
         while not self._closed.is_set():
-            self._wake.wait(self._interval)
+            self._wake.wait(delay)
             self._wake.clear()
+            if self._closed.is_set():
+                return
             self._check()
+            delay = self._next_delay()
+
+    def _next_delay(self) -> Optional[float]:
+        with self._lock:
+            schedule = self._schedule
+        if schedule is None:
+            return self._interval
+
+        delay = schedule()
+        if delay is not None and delay < 0:
+            raise ValueError('authority delay must not be negative')
+        return delay
 
     def _check(self) -> None:
         with self._lock:

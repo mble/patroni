@@ -97,7 +97,7 @@ class TestAgentRpc(unittest.TestCase):
         self.assertIsNone(self.rpc.handle(self.request(Operation.SUBMIT, (lifecycle, 1), 3)).error)
 
         self.clock.value += 1
-        guard, fence = self.monitor.bind.call_args.args
+        guard, fence, _ = self.monitor.bind.call_args.args
         self.assertEqual(SafetyAction.FENCE, guard())
         fence()
 
@@ -120,7 +120,7 @@ class TestAgentRpc(unittest.TestCase):
         lifecycle = command()
         self.rpc.handle(self.request(Operation.SUBMIT, (lifecycle, 0), 3))
 
-        guard, _ = self.monitor.bind.call_args.args
+        guard, _, _ = self.monitor.bind.call_args.args
 
         self.assertIsNone(response.error)
         self.assertEqual(SafetyAction.NONE, guard())

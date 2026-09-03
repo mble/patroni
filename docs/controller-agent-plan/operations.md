@@ -2,9 +2,10 @@
 
 ## Configuration
 
-Run `patroni-agent-supervisor agent.yml` in the PostgreSQL container. Run
-`patroni-controller controller.yml` in the DCS container. Both processes need
-the same absolute Unix-socket path, scope, name, and Pod addresses.
+Run `dumb-init --single-child -- patroni-agent agent.yml` as PID 1 in the
+PostgreSQL container. Run `patroni-controller controller.yml` in the DCS
+container. Both processes need the same absolute Unix-socket path, scope, name,
+and Pod addresses. `patroni-agent-supervisor` remains a Python fallback.
 
 The agent configuration owns PostgreSQL, PGDATA, PostgreSQL authentication,
 bootstrap methods, callbacks, rewind, watchdog, and the `agent` section. It

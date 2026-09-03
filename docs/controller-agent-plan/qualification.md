@@ -4,7 +4,7 @@ Date: 2026-09-03
 
 ## Correctness
 
-The 885-test unit suite passes. Differential Unix tests compare direct and
+The 889-test unit suite passes. Differential Unix tests compare direct and
 split node observations. Final-revision local Jepsen runs used a 15-minute
 fault phase and a two-minute final phase:
 
@@ -80,7 +80,32 @@ The 5,000-call local control-socket sample measured 0.179 ms p50, 0.214 ms
 p95, and 0.307 ms p99. Its p99 is below one percent of the one-second minimum
 HA loop interval.
 
-The split adds one controller interpreter and a small PID-1 supervisor. Removing
-the supervisor's configuration imports reduced its PSS to 6.8 MiB. HA-cycle,
+The split adds one controller interpreter and a PID-1 supervisor. HA-cycle,
 failover, and switchover gates pass. Memory, idle CPU, and REST costs were
 accepted for this fork on 2026-09-03.
+
+### Performance pass
+
+A fresh matched run reused authenticated control connections, scheduled
+authority checks at their deadlines, and replaced the Python PID-1 process with
+`dumb-init`. CPU is a 120-second process-time delta. PSS is summed from
+`smaps_rollup`. REST values are medians of five 1,000-call rounds.
+
+| Sample | Monolithic | Split | Change |
+|---|---:|---:|---:|
+| Idle Patroni PSS | 39.1 MiB | 69.9 MiB | +79% |
+| Idle Patroni CPU | 0.292% core | 0.500% core | +71% |
+| REST `/patroni` p50 | 0.843 ms | 1.332 ms | +58% |
+| REST `/patroni` p95 | 1.181 ms | 1.716 ms | +45% |
+
+Compared with the accepted split samples, PSS fell 10%, CPU fell 31.8%, and
+REST p95 fell 16.1%. Native PID 1 used about 0.1 MiB PSS instead of 7.3 MiB.
+The remaining memory cost is the second Patroni Python interpreter. REST keeps
+a required cross-process snapshot, codec, and context switch. CPU retains two
+runtimes plus controller policy and agent lifecycle work. Removing those costs
+would require a native agent or protocol redesign, not another supervisor
+change.
+
+A two-minute split Jepsen regression with process and network faults remained
+valid: no lost or unexpected writes and no overlapping writable primaries. It
+supplements, but does not replace, the required 15-minute CI campaign.

@@ -124,6 +124,13 @@ class ProtocolError(ValueError):
         self.code = code
 
 
+class ConnectionClosed(ProtocolError):
+    """Mark a clean close between complete protocol frames."""
+
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.UNAVAILABLE, 'connection closed between frames')
+
+
 class Request(NamedTuple):
     """Validated request envelope."""
 
@@ -240,6 +247,8 @@ def _read_exact(stream: socket, size: int) -> bytes:
     while remaining:
         chunk = stream.recv(remaining)
         if not chunk:
+            if remaining == size:
+                raise ConnectionClosed()
             raise ProtocolError(ErrorCode.BAD_REQUEST, 'connection closed during frame')
         chunks.append(chunk)
         remaining -= len(chunk)

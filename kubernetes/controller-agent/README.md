@@ -1,7 +1,8 @@
 # Controller-agent StatefulSet
 
 This example runs one controller and one agent per Pod with etcd3. Build an
-image containing this branch as `patroni-controller-agent:latest`.
+image containing this branch and `dumb-init` as
+`patroni-controller-agent:latest`.
 
 Create `patroni-split-postgres` with `superuser-password` and
 `replication-password`. Create `patroni-etcd-client` with `ca.crt`, `tls.crt`,

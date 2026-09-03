@@ -13,7 +13,7 @@ APT::Install-Suggests "0";' > /etc/apt/apt.conf.d/01buildconfig && \
     apt-get upgrade -y && \
     # allow starting sshd
     echo '#!/bin/sh' > /usr/sbin/policy-rc.d && \
-    apt-get install -y etcd-client runit vim curl ca-certificates jq git less locales rsync \
+    apt-get install -y dumb-init etcd-client runit vim curl ca-certificates jq git less locales rsync \
         iptables bind9-host net-tools iputils-ping sudo telnet openssh-server coreutils && \
     # Make sure we have a en_US.UTF-8 locale available
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8 && \

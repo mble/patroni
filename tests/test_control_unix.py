@@ -78,6 +78,21 @@ class TestControlUnix(unittest.TestCase):
         self.assertTrue(client.is_running())
         self.node.is_running.assert_called_once_with()
 
+    def test_connection_is_reused(self) -> None:
+        self.server.close()
+        server_peer = Mock()
+        client_peer = Mock()
+        self.server = UnixServer(self.path, self.rpc.handle, server_peer)
+        self.server.start()
+        client = AgentClient(self.path, peer_check=client_peer)
+
+        self.assertTrue(client.is_running())
+        self.assertFalse(client.is_primary())
+        client.close()
+
+        self.assertEqual(1, server_peer.call_count)
+        self.assertEqual(1, client_peer.call_count)
+
     def test_client_rejects_minor_skew(self) -> None:
         hello = Hello(
             str(uuid4()), PROTOCOL_MAJOR, PROTOCOL_MINOR - 1,

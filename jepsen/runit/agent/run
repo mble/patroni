@@ -80,4 +80,5 @@ chown postgres:postgres "$PGHOME/.ssh/known_hosts"
 unset PATRONI_ETCD3_HOSTS ETCDCTL_ENDPOINTS
 unset PATRONI_REPLICATION_PASSWORD PATRONI_REWIND_PASSWORD PATRONI_SUPERUSER_PASSWORD
 
-exec chpst -u postgres env HOME="$PGHOME" patroni-agent-supervisor "$AGENT_CONFIG"
+exec chpst -u postgres env HOME="$PGHOME" \
+    dumb-init --single-child -- patroni-agent "$AGENT_CONFIG"

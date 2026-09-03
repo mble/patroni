@@ -199,6 +199,19 @@ class SafetyState:
         """Check the current deadline without polling."""
         return self._guard()
 
+    def next_check(self) -> Optional[float]:
+        """Return when authority can next change the safety decision."""
+        if self._policy_mode == PolicyMode.PAUSED:
+            return None
+        if self._postgres_role != PostgresRole.PRIMARY and not self._command_needs_authority():
+            return None
+
+        authority = self._authority
+        if authority is None:
+            return 0.0
+
+        return max(0.0, authority.deadline - self._clock())
+
     def disconnect(self) -> None:
         """Record controller loss while retaining the current deadline."""
         self._connected = False

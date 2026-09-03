@@ -56,7 +56,10 @@ spec:
           image: patroni-controller-agent:latest
           imagePullPolicy: IfNotPresent
           command:
-            - patroni-agent-supervisor
+            - /usr/bin/dumb-init
+            - --single-child
+            - --
+            - patroni-agent
             - /etc/patroni/agent.yml
           env:
             - name: POD_IP

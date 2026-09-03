@@ -8,7 +8,7 @@ import struct
 from threading import BoundedSemaphore, Event, RLock, Thread
 from typing import Callable, cast, Dict, Optional
 
-from .protocol import ErrorCode, ProtocolError, read_frame, Response, write_frame
+from .protocol import ConnectionClosed, ErrorCode, ProtocolError, read_frame, Response, write_frame
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,6 @@ DEFAULT_BACKLOG = 32
 DEFAULT_MAX_WORKERS = 16
 DEFAULT_SOCKET_MODE = 0o600
 DEFAULT_TIMEOUT = 5.0
-ACCEPT_TIMEOUT = 0.2
 STALE_CONNECT_TIMEOUT = 0.1
 UNSAFE_WORLD_BITS = stat.S_IWOTH
 
@@ -76,7 +75,6 @@ class UnixServer:
             os.chmod(self._path, self._socket_mode)
             self._inode = os.lstat(self._path).st_ino
             listener.listen(DEFAULT_BACKLOG)
-            listener.settimeout(ACCEPT_TIMEOUT)
         except Exception:
             listener.close()
             raise
@@ -90,6 +88,7 @@ class UnixServer:
         self._closed.set()
         listener = self._listener
         if listener is not None:
+            self._wake_listener()
             listener.close()
         with self._lock:
             connections = tuple(self._connections.values())
@@ -107,11 +106,12 @@ class UnixServer:
         while not self._closed.is_set():
             try:
                 stream, _ = listener.accept()
-            except socket.timeout:
-                continue
             except OSError:
                 if not self._closed.is_set():
                     logger.exception('Control socket accept failed')
+                return
+            if self._closed.is_set():
+                stream.close()
                 return
             if not self._workers.acquire(False):
                 stream.close()
@@ -127,11 +127,15 @@ class UnixServer:
         try:
             stream.settimeout(self._timeout)
             self._verify_peer(stream)
-            request = read_frame(stream)
-            response = self._handler(request)
-            if not isinstance(cast(object, response), Response):
-                raise ProtocolError(ErrorCode.INTERNAL, 'handler response is invalid')
-            write_frame(stream, response)
+            while not self._closed.is_set():
+                try:
+                    request = read_frame(stream)
+                except (ConnectionClosed, socket.timeout):
+                    return
+                response = self._handler(request)
+                if not isinstance(cast(object, response), Response):
+                    raise ProtocolError(ErrorCode.INTERNAL, 'handler response is invalid')
+                write_frame(stream, response)
         except ProtocolError as exc:
             try:
                 write_frame(stream, Response('', exc.code, None))
@@ -148,6 +152,16 @@ class UnixServer:
                 self._connections.pop(identity, None)
             stream.close()
             self._workers.release()
+
+    def _wake_listener(self) -> None:
+        wake = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            wake.settimeout(STALE_CONNECT_TIMEOUT)
+            wake.connect(self._path)
+        except OSError:
+            pass
+        finally:
+            wake.close()
 
 
 def _path(path: str, socket_mode: int) -> None:

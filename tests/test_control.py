@@ -190,6 +190,19 @@ class TestSafetyState(unittest.TestCase):
         self.assertEqual(AuthorityState.EXPIRED, self.state.snapshot.authority_state)
         self.assertEqual(SafetyAction.REJECT, self.state.submit(self.command()).action)
 
+    def test_next_check_tracks_primary_deadline(self) -> None:
+        self.assertIsNone(self.state.next_check())
+        self.grant(lifetime=1)
+        self.assertIsNone(self.state.next_check())
+
+        self.state.observe(PostgresRole.PRIMARY)
+        self.assertEqual(1, self.state.next_check())
+        self.clock.advance(0.25)
+        self.assertEqual(0.75, self.state.next_check())
+
+        self.state.policy(PolicyMode.PAUSED, 2)
+        self.assertIsNone(self.state.next_check())
+
     def test_primary_without_authority_fences_when_active(self) -> None:
         action = self.state.observe(PostgresRole.PRIMARY)
 

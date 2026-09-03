@@ -68,6 +68,7 @@ etcd v2, and qualification of other DCS implementations.
 | [M08](milestones/08-controller.md) | Complete: controller mode and REST parity |
 | [M09](milestones/09-kubernetes.md) | Complete: Kubernetes and fault qualification |
 | [M10](milestones/10-rollout.md) | Complete: parity, rollout, and rollback |
+| [M11](milestones/11-performance.md) | Complete: split-process performance pass |
 
 Complete milestones in order. Each requires correctness, security, and
 performance review before merge. Remediation repeats affected reviews.

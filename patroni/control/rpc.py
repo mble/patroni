@@ -142,7 +142,7 @@ class AgentRpc:
             self._safety = SafetyState(
                 self._agent_boot_id, request.controller_boot_id, self._clock, SAFETY_HISTORY,
             )
-            self._monitor.bind(self._tick, self._fence)
+            self._monitor.bind(self._tick, self._fence, self._next_check)
             self._monitor.wake()
         elif request.controller_boot_id != self._controller_boot_id:
             with self._safety_lock:
@@ -379,12 +379,17 @@ class AgentRpc:
         with self._safety_lock:
             return self._safety_state().tick()
 
+    def _next_check(self) -> Optional[float]:
+        with self._safety_lock:
+            return self._safety_state().next_check()
+
     def _observe(self) -> None:
         snapshot = self._node.snapshot(
             SnapshotDetail.BASIC, Freshness.FRESH, ObservationContext(None),
         )
         with self._safety_lock:
             action = self._safety_state().observe(snapshot.observed_role)
+        self._monitor.wake()
         if action == SafetyAction.FENCE:
             self._fence()
 
@@ -439,6 +444,7 @@ class AgentClient(NodeControl):
         self._last_snapshot: Optional[NodeSnapshot] = None
         self._last_telemetry = AgentTelemetry(None, None, 0, FenceReason.NONE, 0, '')
         self._lock = RLock()
+        self._stream: Optional[socket.socket] = None
         hello = self._rpc(Operation.HELLO, None)
         if not isinstance(hello, Hello):
             raise ProtocolError(ErrorCode.BAD_REQUEST, 'hello response is invalid')
@@ -512,6 +518,7 @@ class AgentClient(NodeControl):
         with self._lock:
             self._closed = True
             self._connected = False
+            self._close_stream()
 
     def submit(self, command: LifecycleCommand) -> CommandSubmission:
         return cast(CommandSubmission, self._rpc(Operation.SUBMIT, (command, self._authority_term)))
@@ -743,12 +750,9 @@ class AgentClient(NodeControl):
         last_error: Optional[Exception] = None
         for _ in range(MAX_RPC_ATTEMPTS):
             try:
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-                    stream.settimeout(self._timeout)
-                    stream.connect(self._path)
-                    self._peer_check(stream)
-                    write_frame(stream, request)
-                    response = read_frame(stream)
+                stream = self._stream or self._connect()
+                write_frame(stream, request)
+                response = read_frame(stream)
                 if not isinstance(response, Response) or response.request_id != request.request_id:
                     raise ProtocolError(ErrorCode.BAD_REQUEST, 'response envelope is invalid')
                 self._connected = True
@@ -756,8 +760,27 @@ class AgentClient(NodeControl):
                 return response
             except (OSError, ProtocolError) as exc:
                 last_error = exc
+                self._close_stream()
         self._connected = False
         raise ProtocolError(ErrorCode.UNAVAILABLE, 'agent is unavailable') from last_error
+
+    def _connect(self) -> socket.socket:
+        stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            stream.settimeout(self._timeout)
+            stream.connect(self._path)
+            self._peer_check(stream)
+        except Exception:
+            stream.close()
+            raise
+        self._stream = stream
+        return stream
+
+    def _close_stream(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            stream.close()
 
 
 def _args(value: object, count: int) -> Tuple[Any, ...]:

@@ -4,7 +4,8 @@ Status: complete, 2026-09-02
 
 Implementation: `patroni/agent.py`, `patroni/agent_supervisor.py`,
 `patroni/control/authority.py`, `tests/test_agent.py`, and
-`tests/test_control_authority.py`.
+`tests/test_control_authority.py`. Container examples use native `dumb-init`;
+the Python supervisor remains a fallback.
 
 `patroni-agent` constructs PostgreSQL, recovery, replication, commands, and
 watchdog services without constructing a DCS client. It rejects top-level DCS

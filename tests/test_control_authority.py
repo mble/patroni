@@ -1,3 +1,4 @@
+import time
 import unittest
 
 from threading import Event
@@ -42,3 +43,38 @@ class TestAuthorityMonitor(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             monitor.bind(lambda: SafetyAction.NONE, lambda: None)
+
+    def test_schedule_suppresses_polling(self) -> None:
+        checked = Event()
+        calls = []
+        monitor = AuthorityMonitor(0.01)
+
+        def guard() -> SafetyAction:
+            calls.append(1)
+            checked.set()
+            return SafetyAction.NONE
+
+        monitor.bind(guard, lambda: None, lambda: None)
+        monitor.start()
+        self.assertTrue(checked.wait(1))
+        time.sleep(0.03)
+        monitor.close()
+
+        self.assertEqual([1], calls)
+
+    def test_schedule_fences_at_deadline(self) -> None:
+        fenced = Event()
+        deadline = time.monotonic() + 0.02
+        monitor = AuthorityMonitor()
+
+        def guard() -> SafetyAction:
+            return SafetyAction.FENCE if time.monotonic() >= deadline else SafetyAction.NONE
+
+        def schedule():
+            return None if fenced.is_set() else max(0.0, deadline - time.monotonic())
+
+        monitor.bind(guard, fenced.set, schedule)
+        monitor.start()
+
+        self.assertTrue(fenced.wait(1))
+        monitor.close()
