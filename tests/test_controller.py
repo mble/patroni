@@ -124,6 +124,11 @@ class TestControllerPostgresql(unittest.TestCase):
         self.assertEqual(PostgresqlState.STOPPED, self.postgresql.state)
         self.node.submit.assert_not_called()
 
+    def test_health_checks_postmaster(self) -> None:
+        self.node.is_running.return_value = False
+
+        self.assertFalse(self.postgresql.is_healthy())
+
 
 class TestPatroniController(unittest.TestCase):
 

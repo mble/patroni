@@ -10,7 +10,7 @@
 - Strict operation-specific validation.
 - Socket permissions and `SO_PEERCRED` checks on both sides.
 - Explicit errors; never return exception representations.
-- Adjacent minor versions remain compatible. Major mismatches fail.
+- Major or minor mismatches fail closed.
 
 The server bounds frame size, workers, deadlines, command history, and result
 size. Stale-socket cleanup first verifies path type, ownership, and failed

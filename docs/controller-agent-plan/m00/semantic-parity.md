@@ -1,5 +1,8 @@
 # Semantic parity matrix
 
+Implementation status: complete, 2026-09-03. Release status remains gated by
+M10 qualification and performance acceptance.
+
 Each split assertion is mandatory. Current code and tests define details not
 restated here.
 

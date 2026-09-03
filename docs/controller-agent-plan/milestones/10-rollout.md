@@ -1,5 +1,7 @@
 # M10: Parity, rollout, and rollback
 
+Status: pending performance acceptance
+
 ## Goal
 
 Make split mode operable without forcing a flag-day cluster conversion.
@@ -51,3 +53,12 @@ accepted performance regression requires explicit approval.
 
 Split mode is deployable, the release Jepsen soak passes, and no semantic
 difference remains. Removing monolithic mode is a separate decision.
+
+## Result
+
+Configuration, feature status, rollout, rollback, and qualification evidence
+are published under `docs/controller-agent-plan`. Monolithic Patroni remains
+available. Extended PostgreSQL 13 split, PostgreSQL 18 split, and PostgreSQL 17
+mixed campaigns pass locally across the qualification work; the final-revision
+matrix is a required merge gate. Wire-version skew fails closed. M10 awaits
+acceptance of the measured process and REST overhead.

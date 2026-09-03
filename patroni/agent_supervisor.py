@@ -1,4 +1,5 @@
 """PID-1 supervisor for the Patroni agent container."""
+import argparse
 import errno
 import logging
 import os
@@ -9,12 +10,13 @@ import sys
 from types import FrameType
 from typing import Any, Dict, List, Optional
 
-from patroni.daemon import get_base_arg_parser
+from patroni.version import __version__
 
 logger = logging.getLogger(__name__)
 
 FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 SIGNAL_EXIT_OFFSET = 128
+CONFIG_ENV = 'PATRONI_CONFIGURATION'
 
 
 class AgentSupervisor:
@@ -88,7 +90,14 @@ class AgentSupervisor:
 
 
 def main() -> None:
-    args = get_base_arg_parser().parse_args()
+    # Keep PID 1 independent of Patroni's configuration dependency tree.
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--version', action='version', version='%(prog)s {0}'.format(__version__))
+    parser.add_argument(
+        'configfile', nargs='?', default='',
+        help='configuration file; {0} is also supported'.format(CONFIG_ENV),
+    )
+    args = parser.parse_args()
     command = [sys.executable, '-m', 'patroni.agent']
     if args.configfile:
         command.append(args.configfile)

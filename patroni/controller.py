@@ -176,11 +176,7 @@ class ControllerPostgresql:
         self._record_state(state)
 
     def is_healthy(self) -> bool:
-        return self._state() in (
-            PostgresqlState.RUNNING,
-            PostgresqlState.STARTING,
-            PostgresqlState.RESTARTING,
-        )
+        return self._node.is_running()
 
     def check_for_startup(self) -> bool:
         return self._state() in (

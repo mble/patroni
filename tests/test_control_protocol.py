@@ -102,6 +102,14 @@ class TestControlProtocol(unittest.TestCase):
 
         self.assertEqual(ErrorCode.VERSION, raised.exception.code)
 
+    def test_older_minor_version_is_rejected(self) -> None:
+        frame = HEADER.pack(MAGIC, PROTOCOL_MAJOR, PROTOCOL_MINOR - 1, 0)
+
+        with self.assertRaises(ProtocolError) as raised:
+            unpack(frame)
+
+        self.assertEqual(ErrorCode.VERSION, raised.exception.code)
+
     def test_duplicate_json_key_is_rejected(self) -> None:
         payload = b'{"key":1,"key":2}'
         frame = HEADER.pack(MAGIC, PROTOCOL_MAJOR, PROTOCOL_MINOR, len(payload)) + payload

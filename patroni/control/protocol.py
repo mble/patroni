@@ -216,7 +216,7 @@ def write_frame(stream: socket, value: object) -> None:
 def _header(magic: bytes, major: int, minor: int, size: int) -> None:
     if magic != MAGIC:
         raise ProtocolError(ErrorCode.BAD_REQUEST, 'frame magic mismatch')
-    if major != PROTOCOL_MAJOR or minor > PROTOCOL_MINOR:
+    if major != PROTOCOL_MAJOR or minor != PROTOCOL_MINOR:
         raise ProtocolError(ErrorCode.VERSION, 'protocol version mismatch')
     if size > MAX_FRAME_BYTES:
         raise ProtocolError(ErrorCode.BAD_REQUEST, 'frame exceeds limit')

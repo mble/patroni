@@ -36,7 +36,7 @@ Run the established contract safely between separate local processes.
 - Non-socket, symlink, foreign, stale, and active paths.
 - Disconnect during every command phase.
 - Safepoint event replay, acknowledgement, overrun, and reconnect.
-- Adjacent minor-version combinations.
+- Minor-version mismatches fail closed.
 
 ## Reviews
 

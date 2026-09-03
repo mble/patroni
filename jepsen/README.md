@@ -6,6 +6,7 @@ members. The mixed overlay replaces `patroni1` with monolithic Patroni.
 ```sh
 docker compose build
 docker compose up -d
+docker exec jepsen-test bash rollout.sh
 docker exec jepsen-test bash run.sh
 docker compose down
 ```
@@ -26,6 +27,10 @@ overlapping writable primaries. Each primary probe holds a one-second write
 transaction on every member concurrently. CI retains the history, nemesis
 events, checker output, DCS state, Patroni logs, PostgreSQL logs, and final
 cluster state for 14 days.
+
+`rollout.sh` first converts one replica from split mode to monolithic Patroni
+and back. It proves PostgreSQL stops between managers and PGDATA keeps the same
+system identifier.
 
 Set `JEPSEN_SEED`, `JEPSEN_TIME_LIMIT`, `JEPSEN_FINAL_TIME_LIMIT`,
 `JEPSEN_RECOVERY_SECONDS`, or `JEPSEN_RUN_TIMEOUT` to reproduce a run. The

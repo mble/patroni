@@ -1,10 +1,11 @@
 import signal
+import sys
 import unittest
 
 from unittest.mock import Mock, patch
 
 from patroni.agent import _control_config, _reject_dcs, DCS_SECTIONS, PatroniAgent
-from patroni.agent_supervisor import AgentSupervisor, SIGNAL_EXIT_OFFSET
+from patroni.agent_supervisor import AgentSupervisor, main as supervisor_main, SIGNAL_EXIT_OFFSET
 from patroni.control import CommandKind, CommandState, PolicyMode, SubmitState
 from patroni.exceptions import PatroniFatalException
 
@@ -107,6 +108,17 @@ class TestPatroniAgent(unittest.TestCase):
 
 
 class TestAgentSupervisor(unittest.TestCase):
+
+    @patch('patroni.agent_supervisor.AgentSupervisor')
+    def test_main_forwards_config(self, supervisor) -> None:
+        supervisor.return_value.run.return_value = 0
+
+        with patch.object(sys, 'argv', ['patroni-agent-supervisor', 'agent.yml']), \
+                self.assertRaises(SystemExit) as raised:
+            supervisor_main()
+
+        self.assertEqual(0, raised.exception.code)
+        supervisor.assert_called_once_with([sys.executable, '-m', 'patroni.agent', 'agent.yml'])
 
     @patch('patroni.agent_supervisor.os.waitpid')
     def test_reaps_adopted_children(self, waitpid) -> None:

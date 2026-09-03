@@ -57,6 +57,7 @@ RUN pip3 install --break-system-packages '/src[psycopg3]' && \
 
 COPY jepsen/runit/agent /etc/service/patroni-agent
 COPY jepsen/runit/controller /etc/service/patroni-controller
+COPY jepsen/runit/patroni /etc/patroni-services/patroni
 
 ENV PGHOME=$PGHOME PGDATA=$PGHOME/data PATH=$PATH:$PGBIN
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 EDITOR=/usr/bin/editor

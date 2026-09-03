@@ -15,7 +15,8 @@ from patroni.control.authority import AuthorityMonitor
 from patroni.control.commands import CommandResult, CommandSubmission, CommandValue, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
 from patroni.control.config import config_plan
-from patroni.control.protocol import ErrorCode, ProtocolError
+from patroni.control.protocol import Capability, ErrorCode, Hello, \
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, ProtocolError, Response
 from patroni.control.rpc import AgentClient, AgentRpc
 from patroni.control.unix import peer_check, UnixServer
 
@@ -76,6 +77,17 @@ class TestControlUnix(unittest.TestCase):
 
         self.assertTrue(client.is_running())
         self.node.is_running.assert_called_once_with()
+
+    def test_client_rejects_minor_skew(self) -> None:
+        hello = Hello(
+            str(uuid4()), PROTOCOL_MAJOR, PROTOCOL_MINOR - 1,
+            tuple(Capability), None, 0,
+        )
+        response = Response('', None, hello)
+
+        with patch.object(AgentClient, '_exchange', return_value=response), \
+                self.assertRaises(ProtocolError):
+            AgentClient(self.path, peer_check=allow_peer)
 
     def test_direct_and_split_traces_match(self) -> None:
         direct = observation_trace(self.node)

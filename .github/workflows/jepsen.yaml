@@ -47,6 +47,7 @@ jobs:
         docker compose build
         docker compose up -d
         mkdir -p jepsen/logs
+        docker exec jepsen-test bash rollout.sh
         docker exec jepsen-test bash run.sh 2>&1 | tee jepsen/logs/jepsen.log
 
     - name: Collect evidence

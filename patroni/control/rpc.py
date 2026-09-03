@@ -796,7 +796,7 @@ def _uuid(value: object, field: str) -> None:
 
 def _hello(value: Hello) -> None:
     _uuid(value.agent_boot_id, 'agent boot ID')
-    if value.protocol_major != PROTOCOL_MAJOR or value.protocol_minor > PROTOCOL_MINOR:
+    if value.protocol_major != PROTOCOL_MAJOR or value.protocol_minor != PROTOCOL_MINOR:
         raise ProtocolError(ErrorCode.VERSION, 'protocol version mismatch')
     if not value.capabilities or len(set(value.capabilities)) != len(value.capabilities):
         raise ProtocolError(ErrorCode.VERSION, 'protocol capabilities are invalid')
