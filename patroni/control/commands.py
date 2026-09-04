@@ -830,8 +830,9 @@ def _slot_plan(value: object) -> None:
         _slot_name(name)
         if name not in names:
             raise ValueError('unknown copy slot')
+    # Failsafe feedback uses raw member names as status keys.
     for name, location in value.context.status_slots:
-        _slot_name(name)
+        _text(name, 'slot status key')
         _location(location)
     for name in value.context.retain_slots:
         _slot_name(name)

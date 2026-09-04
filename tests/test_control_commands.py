@@ -3,8 +3,8 @@ import unittest
 from threading import Event, Thread
 from uuid import uuid4
 
-from patroni.control import BootstrapState, CallbackKind, CloneMode, \
-    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy
+from patroni.control import BootstrapState, CallbackKind, CloneMode, CommandKind, CommandPhase, \
+    CommandState, DesiredRole, DivergencePolicy, SlotAction, SlotContext, SlotPlan, SlotTags
 from patroni.control.commands import AckState, AgentCommands, CheckpointMode, \
     CommandDriver, CommandResult, CommandValue, DriverResult, EventChannel, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
@@ -248,6 +248,18 @@ class TestAgentCommands(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.commands.submit(request)
+
+    def test_slot_status_accepts_member_names(self) -> None:
+        context = SlotContext(
+            'postgres-1', True, None, (), (('postgres-2', 10),), (),
+            SlotTags(False, False, None),
+        )
+        plan = SlotPlan(SlotAction.APPLY, context, (), ())
+        request = command(kind=CommandKind.APPLY_SLOTS)._replace(slot_plan=plan)
+
+        submission = self.commands.submit(request)
+
+        self.assertEqual(SubmitState.ACCEPTED, submission.state)
 
     def test_rewind_requires_target_and_policy(self) -> None:
         request = command(kind=CommandKind.REWIND)._replace(divergence=DivergencePolicy.REWIND)

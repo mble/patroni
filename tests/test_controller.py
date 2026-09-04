@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import unittest
@@ -25,7 +26,7 @@ class TestControllerConfig(unittest.TestCase):
 name: node-a
 scope: cluster-a
 controller:
-  socket: /run/patroni/agent.sock
+  socket: {0}
 etcd3:
   host: etcd:2379
 postgresql:
@@ -33,13 +34,13 @@ postgresql:
 restapi:
   listen: 0.0.0.0:8008
   connect_address: node-a:8008
-"""
+""".format(os.path.abspath('agent.sock'))
         with patch.dict('os.environ', {Config.PATRONI_CONFIG_VARIABLE: document}):
             config = Config('')
 
         result = _controller_config(config.local_configuration)
 
-        self.assertEqual('/run/patroni/agent.sock', result.socket)
+        self.assertEqual(os.path.abspath('agent.sock'), result.socket)
 
     def test_controller_import_needs_no_psycopg(self) -> None:
         script = """
@@ -69,7 +70,7 @@ import patroni.controller
 
     def test_rejects_postgres_secrets_and_paths(self) -> None:
         base = {
-            'controller': {'socket': '/run/patroni/agent.sock'},
+            'controller': {'socket': os.path.abspath('agent.sock')},
             'etcd3': {'hosts': ['etcd:2379']},
         }
         for key in ('authentication', 'data_dir', 'bin_dir', 'pgpass'):

@@ -51,7 +51,7 @@ class TestPatroniAgent(unittest.TestCase):
                                             server, daemon_init, configure_pool) -> None:
         config = AgentConfig(
             postgresql={'name': 'node-a'},
-            agent={'socket': '/run/patroni/agent.sock'},
+            agent={'socket': os.path.abspath('agent.sock')},
             thread_pool_size=7,
         )
 
