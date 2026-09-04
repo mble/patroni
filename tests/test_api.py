@@ -231,7 +231,7 @@ class TestRestApiHandler(unittest.TestCase):
             MockRestApiServer(RestApiHandler, 'GET /patroni')
 
         node.snapshot.assert_called_once()
-        self.assertEqual(node.snapshot.call_args.args[1], Freshness.FRESH_RETRY)
+        self.assertEqual(node.snapshot.call_args[0][1], Freshness.FRESH_RETRY)
 
     def test_rest_has_no_direct_observations(self):
         source = inspect.getsource(RestApiHandler)
@@ -503,7 +503,7 @@ class TestRestApiHandler(unittest.TestCase):
                 patch.object(RestApiHandler, 'write_response') as response_mock:
             MockRestApiServer(RestApiHandler, 'GET /metrics')
 
-        body = response_mock.call_args.args[1]
+        body = response_mock.call_args[0][1]
         self.assertIn('patroni_agent_command_active{scope="dummy",name="test",kind="promote",phase="mutating"} 1',
                       body)
         self.assertIn('patroni_agent_fence_total{scope="dummy",name="test"} 4.0', body)

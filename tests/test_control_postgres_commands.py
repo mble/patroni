@@ -66,8 +66,8 @@ class TestPostgresCommandDriver(unittest.TestCase):
         thread.join(1)
         self.assertEqual([DriverResult(CommandValue.TRUE, 20, 10, ())], result)
         self.postgresql.stop.assert_called_once()
-        self.assertEqual('fast', self.postgresql.stop.call_args.args[0])
-        self.assertNotIn('checkpoint', self.postgresql.stop.call_args.kwargs)
+        self.assertEqual('fast', self.postgresql.stop.call_args[0][0])
+        self.assertNotIn('checkpoint', self.postgresql.stop.call_args[1])
 
     def test_lost_event_does_not_block_stop(self) -> None:
         def stop(*args, **kwargs):
@@ -88,7 +88,7 @@ class TestPostgresCommandDriver(unittest.TestCase):
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
         self.assertEqual(DriverResult(CommandValue.PENDING, None, None, ()), value)
-        self.assertEqual(PostgresqlRole.PRIMARY, self.postgresql.start.call_args.kwargs['role'])
+        self.assertEqual(PostgresqlRole.PRIMARY, self.postgresql.start.call_args[1]['role'])
 
     def test_cancel_reaches_postgresql(self) -> None:
         self.driver.cancel()
@@ -136,11 +136,11 @@ class TestPostgresCommandDriver(unittest.TestCase):
         value = self.driver.run(request, EventChannel(request.command_id), self.cancelled)
 
         self.assertEqual(DriverResult(CommandValue.TRUE, None, None, ()), value)
-        member = self.postgresql.follow.call_args.args[0]
+        member = self.postgresql.follow.call_args[0][0]
         self.assertEqual({'host': '127.0.0.1', 'port': '5432', 'dbname': 'postgres'},
                          member.data['conn_kwargs'])
         self.assertNotIn('password', repr(member))
-        self.assertTrue(self.postgresql.follow.call_args.kwargs['do_reload'])
+        self.assertTrue(self.postgresql.follow.call_args[1]['do_reload'])
 
     def test_rewind_uses_typed_policy(self) -> None:
         recovery = Mock()

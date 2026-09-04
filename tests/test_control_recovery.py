@@ -21,7 +21,7 @@ class TestPostgresRecovery(unittest.TestCase):
 
         self.assertTrue(self.recovery.bootstrap())
 
-        config = self.postgresql.bootstrap.bootstrap.call_args.args[0]
+        config = self.postgresql.bootstrap.bootstrap.call_args[0][0]
         self.assertEqual({'method': 'initdb'}, config)
         self.assertNotIn('controller-secret', repr(config))
 
@@ -43,7 +43,7 @@ class TestPostgresRecovery(unittest.TestCase):
     def test_callback_maps_only_allowlisted_action(self) -> None:
         self.recovery.callback(CallbackKind.START)
 
-        action = self.postgresql.call_nowait.call_args.args[0]
+        action = self.postgresql.call_nowait.call_args[0][0]
         self.assertEqual('on_start', action.value)
 
 

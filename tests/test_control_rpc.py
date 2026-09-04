@@ -89,7 +89,7 @@ class TestAgentRpc(unittest.TestCase):
         self.assertEqual(ErrorCode.STALE, response.error)
 
     def test_role_observation_uses_ha_cadence(self) -> None:
-        _, _, schedule = self.monitor.bind.call_args.args
+        _, _, schedule = self.monitor.bind.call_args[0]
 
         self.assertEqual(ROLE_OBSERVATION_SECONDS, schedule())
 
@@ -106,7 +106,7 @@ class TestAgentRpc(unittest.TestCase):
         )
         self.assertIsNone(self.rpc.handle(self.request(Operation.GRANT, grant, 2)).error)
         self.node.snapshot.return_value = Mock(observed_role=PostgresRole.PRIMARY)
-        guard, _, schedule = self.monitor.bind.call_args.args
+        guard, _, schedule = self.monitor.bind.call_args[0]
         self.assertEqual(SafetyAction.NONE, guard())
 
         self.assertEqual(20, schedule())
@@ -130,7 +130,7 @@ class TestAgentRpc(unittest.TestCase):
         self.assertIsNone(self.rpc.handle(self.request(Operation.SUBMIT, (lifecycle, 1), 3)).error)
 
         self.clock.value += 1
-        guard, fence, _ = self.monitor.bind.call_args.args
+        guard, fence, _ = self.monitor.bind.call_args[0]
         self.assertEqual(SafetyAction.FENCE, guard())
         fence()
 
@@ -150,7 +150,7 @@ class TestAgentRpc(unittest.TestCase):
         self.assertIsNone(self.rpc.handle(self.request(Operation.SUBMIT, (lifecycle, 1), 3)).error)
         self.node.command_status.return_value = finished
 
-        guard, _, _ = self.monitor.bind.call_args.args
+        guard, _, _ = self.monitor.bind.call_args[0]
         guard()
         telemetry = self.rpc.handle(self.request(Operation.TELEMETRY, None, 4)).body
 
@@ -229,7 +229,7 @@ class TestAgentRpc(unittest.TestCase):
         lifecycle = command()
         self.rpc.handle(self.request(Operation.SUBMIT, (lifecycle, 0), 3))
 
-        guard, _, _ = self.monitor.bind.call_args.args
+        guard, _, _ = self.monitor.bind.call_args[0]
 
         self.assertIsNone(response.error)
         self.assertEqual(SafetyAction.NONE, guard())

@@ -1,3 +1,4 @@
+import os
 import signal
 import sys
 import unittest
@@ -92,7 +93,7 @@ class TestPatroniAgent(unittest.TestCase):
 
         agent._shutdown()
 
-        command = agent.node.submit.call_args.args[0]
+        command = agent.node.submit.call_args[0][0]
         self.assertEqual(CommandKind.STOP, command.kind)
         agent.node.disable_watchdog.assert_called_once_with()
         agent.node.close.assert_called_once_with()
@@ -149,6 +150,7 @@ class TestPatroniAgent(unittest.TestCase):
         agent.node.disable_watchdog.assert_called_once_with()
 
 
+@unittest.skipUnless(os.name == 'posix', 'requires POSIX')
 class TestAgentSupervisor(unittest.TestCase):
 
     @patch('patroni.agent_supervisor.AgentSupervisor')

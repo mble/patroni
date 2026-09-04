@@ -14,7 +14,10 @@ from patroni.version import __version__
 
 logger = logging.getLogger(__name__)
 
-FORWARDED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+FORWARDED_SIGNAL_NAMES = ('SIGHUP', 'SIGINT', 'SIGTERM')
+FORWARDED_SIGNALS = tuple(
+    getattr(signal, name) for name in FORWARDED_SIGNAL_NAMES if hasattr(signal, name)
+)
 SIGNAL_EXIT_OFFSET = 128
 CONFIG_ENV = 'PATRONI_CONFIGURATION'
 

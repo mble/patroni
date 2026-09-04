@@ -187,7 +187,7 @@ class TestPatroniController(unittest.TestCase):
         controller.grant_authority(AuthorityKind.LEADER)
         controller.grant_authority(AuthorityKind.FAILSAFE)
 
-        grants = tuple(call.args[0] for call in controller.node.grant.call_args_list)
+        grants = tuple(call[0][0] for call in controller.node.grant.call_args_list)
         self.assertEqual((1, 1, 2), tuple(grant.term for grant in grants))
         self.assertEqual((25.0, 25.0, 25.0), tuple(
             grant.deadline - grant.issued_at for grant in grants

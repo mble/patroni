@@ -93,7 +93,7 @@ class TestPostgresReplication(unittest.TestCase):
 
         snapshot = self.replication.sync_state(context)
 
-        cluster = self.postgresql.sync_handler.current_state.call_args.args[0]
+        cluster = self.postgresql.sync_handler.current_state.call_args[0][0]
         self.assertEqual('node-a', cluster.sync.leader)
         self.assertEqual(['node-b'], [member.name for member in cluster.members])
         self.assertEqual(('node-b',), snapshot.confirmed)
@@ -105,7 +105,7 @@ class TestPostgresReplication(unittest.TestCase):
         self.replication.apply_sync(plan)
 
         call = self.postgresql.sync_handler.set_synchronous_standby_names.call_args
-        self.assertEqual(0, call.args[1])
+        self.assertEqual(0, call[0][1])
 
     def test_slot_plan_contains_no_credentials(self) -> None:
         context = SlotContext(
@@ -128,7 +128,7 @@ class TestPostgresReplication(unittest.TestCase):
 
         output = self.replication.apply_slots(plan)
 
-        cluster, tags, slots = self.postgresql.slots_handler.apply_replication_slots.call_args.args
+        cluster, tags, slots = self.postgresql.slots_handler.apply_replication_slots.call_args[0]
         self.assertEqual(('logical_a',), output)
         self.assertEqual('node-a', tags.name)
         self.assertEqual(
@@ -148,7 +148,7 @@ class TestPostgresReplication(unittest.TestCase):
 
         self.assertEqual(WatchdogReload.APPLIED, self.replication.reload_watchdog(timing))
         self.assertEqual(WatchdogReload.REPLAYED, self.replication.reload_watchdog(timing))
-        config = self.watchdog.reload_config.call_args.args[0]
+        config = self.watchdog.reload_config.call_args[0][0]
         self.assertEqual(40, config['ttl'])
         self.assertEqual('testing', config['watchdog']['driver'])
         self.assertEqual('/dev/watchdog-test', config['watchdog']['device'])
