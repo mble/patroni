@@ -137,6 +137,10 @@ class UnixServer:
                     request = read_frame(stream)
                 except (ConnectionClosed, socket.timeout):
                     return
+                except OSError:
+                    if self._closed.is_set():
+                        return
+                    raise
                 response = self._handler(request)
                 if not isinstance(cast(object, response), Response):
                     raise ProtocolError(ErrorCode.INTERNAL, 'handler response is invalid')

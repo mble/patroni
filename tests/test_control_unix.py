@@ -280,6 +280,21 @@ class TestControlUnix(unittest.TestCase):
 
         self.assertFalse(os.path.exists(self.path))
 
+    def test_close_socket_error_is_not_logged(self) -> None:
+        stream = Mock()
+
+        def fail_read(size):
+            self.server._closed.set()
+            raise OSError('socket closed')
+
+        stream.recv.side_effect = fail_read
+        self.server._workers.acquire()
+
+        with patch('patroni.control.unix.logger.exception') as log:
+            self.server._handle(stream)
+
+        log.assert_not_called()
+
     def test_status_fails_unknown_when_agent_is_down(self) -> None:
         self.server.start()
         client = AgentClient(self.path, peer_check=allow_peer)
