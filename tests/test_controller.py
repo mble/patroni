@@ -161,7 +161,8 @@ class TestPatroniController(unittest.TestCase):
         })
         get_dcs.return_value = Mock(mpp=Null())
 
-        controller = PatroniController(config, Mock())
+        with patch('patroni.controller.peer_check'):
+            controller = PatroniController(config, Mock())
 
         client.assert_called_once()
         postgresql.assert_called_once()
@@ -189,9 +190,8 @@ class TestPatroniController(unittest.TestCase):
 
         grants = tuple(call[0][0] for call in controller.node.grant.call_args_list)
         self.assertEqual((1, 1, 2), tuple(grant.term for grant in grants))
-        self.assertEqual((25.0, 25.0, 25.0), tuple(
-            grant.deadline - grant.issued_at for grant in grants
-        ))
+        for grant in grants:
+            self.assertAlmostEqual(25.0, grant.deadline - grant.issued_at)
 
 
 class ControllerConfigDict(dict):

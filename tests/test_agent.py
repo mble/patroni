@@ -55,7 +55,8 @@ class TestPatroniAgent(unittest.TestCase):
             thread_pool_size=7,
         )
 
-        agent = PatroniAgent(config, Mock())
+        with patch('patroni.agent.peer_check'):
+            agent = PatroniAgent(config, Mock())
 
         postgresql.assert_called_once_with(config['postgresql'], get_mpp.return_value)
         config_manager.assert_called_once_with(config, postgresql.return_value)

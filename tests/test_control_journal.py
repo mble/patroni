@@ -35,6 +35,7 @@ def command(command_id=None):
     )
 
 
+@unittest.skipUnless(os.name == 'posix', 'requires POSIX')
 class TestCommandJournal(unittest.TestCase):
 
     def setUp(self) -> None:

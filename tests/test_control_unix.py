@@ -46,6 +46,7 @@ def stop_command() -> LifecycleCommand:
     )
 
 
+@unittest.skipUnless(os.name == 'posix', 'requires POSIX')
 class TestControlUnix(unittest.TestCase):
 
     def setUp(self) -> None:
