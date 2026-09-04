@@ -1,6 +1,6 @@
 # M13 acceptance
 
-M13 remains open until CI repeats every release gate on the merge revision.
+M13 is complete for fork revision `ddeadb92`. No upstream merge is planned.
 
 | Gate | Scenario | Required result | Automation |
 |---|---|---|---|
@@ -22,12 +22,17 @@ Paused policy must retain its documented manual-control behavior.
 
 ## Release gates
 
-1. Merge-revision CI must run the Python 3.7–3.14 unit and Behave matrix.
+1. Fork release-revision CI runs the Python 3.7–3.14 unit and Behave matrix.
 2. Local controller and agent images pass size, metadata, SBOM, and
    vulnerability checks.
 3. PostgreSQL 13 and 18 split Jepsen campaigns pass.
 4. PostgreSQL 17 mixed-version Jepsen and same-PGDATA rollout pass.
 5. Local histories, logs, probe events, and performance results are retained.
+
+## Fork release CI
+
+- [Tests](https://github.com/mble/patroni/actions/runs/33927724847) pass.
+- [Role images](https://github.com/mble/patroni/actions/runs/33927724796) pass.
 
 ## Local release results
 
@@ -48,4 +53,4 @@ failover. Idle Patroni CPU fell from 0.500% to 0.433% core. All three pass.
 Fresh idle PSS rose from 69.9 to 77.0 MiB. Median REST p50 rose from 1.332 to
 1.778 ms and p95 from 1.716 to 2.836 ms. The repeat used a newer PostgreSQL 18
 runtime than M11, so it is not a matched attribution. The regressions remain
-visible and require the merge-revision CI environment to confirm them.
+visible and require a matched-runtime repeat before attribution.

@@ -1,6 +1,6 @@
 # M13: Review hardening
 
-Status: local qualification complete; merge-revision CI pending
+Status: complete for fork revision `ddeadb92`
 
 ## Objective
 
@@ -28,8 +28,8 @@ manifest, integration, and fault-injection gates pass.
 
 See the [M13 acceptance matrix](../m13-acceptance.md).
 
-- 901 non-Unix and 19 isolated Unix tests pass. The macOS sandbox rejects
-  late-suite Unix socket binds when all tests share one process.
+- The Python 3.7–3.14 unit and Behave matrix passes on the fork release
+  revision.
 - Flake8 and changed-production Pyright checks pass.
 - Subprocess command, transport, cancellation, and fencing cases pass.
 - The k3d reference deployment passes identity, permission, probe, authority
