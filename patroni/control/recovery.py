@@ -1,6 +1,6 @@
 """Agent-local PostgreSQL recovery driver."""
 from copy import deepcopy
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, cast, Dict, Mapping, Optional, Sequence, Union
 
 from patroni import global_config
 from patroni.async_executor import CriticalTask
@@ -150,7 +150,9 @@ def _target(target: Optional[RecoveryTarget]) -> Optional[Union[Leader, RemoteMe
         },
     }
     if target.kind == TargetKind.REMOTE:
-        standby = global_config.get_standby_cluster_config() or {}
+        raw_standby = global_config.get_standby_cluster_config()
+        standby: Mapping[str, Any] = cast(Mapping[str, Any], raw_standby) \
+            if isinstance(raw_standby, Mapping) else {}
         data.update({key: standby[key] for key in REMOTE_RECOVERY_PARAMETERS if standby.get(key)})
         data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
         if target.slot_name:
