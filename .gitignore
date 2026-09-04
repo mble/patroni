@@ -37,6 +37,7 @@ features/output*
 dummy
 result.json
 role-image-artifacts/
+jepsen/logs/
 
 # Translations
 *.mo

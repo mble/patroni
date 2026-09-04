@@ -26,7 +26,10 @@ Only the agent receives PostgreSQL secrets and mounts PGDATA. Only the
 controller mounts etcd credentials. `/run/patroni` is the sole shared volume.
 The agent runs as UID/GID 999. The controller runs as UID/GID 65532 and receives
 supplemental GID 999 for the socket. Neither gets capabilities or a writable
-root.
+root. A bounded init container makes `/run/patroni` root:999 mode 0770. The
+agent accepts that directory without weakening socket ownership checks.
+PostgreSQL uses the `pgdata` subdirectory because the PVC mount root is not
+owned by UID 999.
 
 The 60-second termination grace exceeds the configured 30-second DCS TTL plus
 the 10-second primary stop bound. Recalculate it when either value changes.

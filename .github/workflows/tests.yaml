@@ -157,6 +157,11 @@ jobs:
       run: python .github/workflows/install_deps.py
     - name: Run behave tests
       run: python .github/workflows/run_tests.py
+
+    - name: Run controller-agent smoke
+      if: matrix.os == 'ubuntu' && matrix.dcs == 'etcd3'
+      run: PATH="/usr/lib/postgresql/17/bin:$PWD:$PATH" scripts/integration/controller-agent-smoke.sh
+
     - name: Upload logs if behave failed
       uses: actions/upload-artifact@v4
       if: failure()

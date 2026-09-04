@@ -1,0 +1,31 @@
+restapi:
+  listen: 0.0.0.0:8008
+
+etcd3:
+  hosts:
+    - etcd-client.database.svc.cluster.local:2379
+
+postgresql:
+  database: postgres
+
+controller:
+  socket: /run/patroni/agent.sock
+  peer_uid: 999
+  peer_gid: 999
+  timeout: 5
+
+watchdog:
+  mode: off
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    primary_stop_timeout: 10
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      pg_hba:
+        - host all all 0.0.0.0/0 scram-sha-256
+        - host replication replicator 0.0.0.0/0 scram-sha-256

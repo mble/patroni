@@ -1,6 +1,7 @@
 import datetime
 import unittest
 
+from threading import Event, Thread
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -227,6 +228,59 @@ class TestInProcessNodeControl(unittest.TestCase):
 
         self.assertEqual(PostgresRole.PRIMARY, snapshot.observed_role)
         self.assertEqual([], self.observer.query_modes)
+
+    def test_status_query_does_not_block_process_state(self) -> None:
+        entered = Event()
+        release = Event()
+        completed = Event()
+        query_status = self.observer.query_status
+
+        def query(mode):
+            entered.set()
+            release.wait(1)
+            return query_status(mode)
+
+        self.observer.query_status = query
+        status = Thread(target=self.snapshot)
+        status.start()
+        self.assertTrue(entered.wait(1))
+        process_state = Thread(target=lambda: (self.node.is_running(), completed.set()))
+        process_state.start()
+
+        responsive = completed.wait(0.2)
+        release.set()
+        status.join(1)
+        process_state.join(1)
+
+        self.assertTrue(responsive)
+
+    def test_status_query_does_not_block_basic_snapshot(self) -> None:
+        entered = Event()
+        release = Event()
+        completed = Event()
+        query_status = self.observer.query_status
+
+        def query(mode):
+            entered.set()
+            release.wait(1)
+            return query_status(mode)
+
+        self.observer.query_status = query
+        status = Thread(target=self.snapshot)
+        status.start()
+        self.assertTrue(entered.wait(1))
+        basic = Thread(target=lambda: (
+            self.snapshot(SnapshotDetail.BASIC),
+            completed.set(),
+        ))
+        basic.start()
+
+        responsive = completed.wait(0.2)
+        release.set()
+        status.join(1)
+        basic.join(1)
+
+        self.assertTrue(responsive)
 
     def test_history_and_checkpoint_reads(self) -> None:
         self.assertEqual(((1, '0/10', 'reason'),), self.node.timeline_history(2))

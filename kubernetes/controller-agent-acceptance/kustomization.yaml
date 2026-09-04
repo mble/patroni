@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: database
+
+resources:
+  - namespace.yaml
+  - ../controller-agent/statefulset.yaml
+  - etcd.yaml
+
+configMapGenerator:
+  - name: patroni-split-agent
+    files:
+      - ../controller-agent/agent.yml
+  - name: patroni-split-controller
+    files:
+      - controller.yml
+
+secretGenerator:
+  - name: patroni-split-postgres
+    literals:
+      - superuser-password=acceptance-superuser
+      - replication-password=acceptance-replication
+  - name: patroni-etcd-client
+    literals:
+      - placeholder=unused
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+patches:
+  - path: statefulset-patch.yaml

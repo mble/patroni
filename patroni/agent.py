@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from patroni import global_config, thread_pool
 from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, \
-    CommandKind, CommandState, DesiredRole, DivergencePolicy, InProcessNodeControl, \
+    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy, InProcessNodeControl, \
     LifecycleCommand, PolicyMode, ReloadMode, StopMode, SubmitState
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.config import AgentConfigManager
@@ -85,6 +85,7 @@ class PatroniAgent(AbstractPatroniDaemon):
 
         self.agent_boot_id = str(uuid4())
         self._wake = Event()
+        self._stopping = Event()
         self._policy = PolicyMode.ACTIVE
         self.authority = AuthorityMonitor()
 
@@ -115,6 +116,7 @@ class PatroniAgent(AbstractPatroniDaemon):
             self.set_policy,
             self._config_manager.apply,
         )
+        commands.bind_phase(self._command_phase)
         self._server = UnixServer(
             control_config.path,
             self._rpc.handle,
@@ -129,6 +131,15 @@ class PatroniAgent(AbstractPatroniDaemon):
         if not isinstance(cast(object, mode), PolicyMode):
             raise ValueError('invalid agent policy')
         self._policy = mode
+
+    def _command_phase(self, command_id: str, phase: CommandPhase) -> bool:
+        """Allow only the agent's local STOP during shutdown."""
+        if self._stopping.is_set():
+            result = self.node.command_status(command_id)
+            if result is not None and result.request.kind == CommandKind.STOP:
+                return True
+
+        return self._rpc.phase(command_id, phase)
 
     def run(self) -> None:
         self._server.start()
@@ -149,6 +160,7 @@ class PatroniAgent(AbstractPatroniDaemon):
             logger.exception('Failed to reload agent configuration')
 
     def _shutdown(self) -> None:
+        self._stopping.set()
         self._server.close()
         self.authority.close()
         if self._policy == PolicyMode.ACTIVE:
@@ -166,6 +178,7 @@ class PatroniAgent(AbstractPatroniDaemon):
             time.sleep(SHUTDOWN_POLL_SECONDS)
         if self.node.active_command() is not None:
             logger.error('Agent command did not cancel before shutdown')
+            self._fence_postgres(timeout)
             return
 
         command = LifecycleCommand(
@@ -189,12 +202,22 @@ class PatroniAgent(AbstractPatroniDaemon):
         submission = self.node.submit(command)
         if submission.state not in (SubmitState.ACCEPTED, SubmitState.REPLAYED):
             logger.error('Agent shutdown command was rejected')
+            self._fence_postgres(timeout)
             return
 
         remaining = max(0.0, deadline - time.monotonic())
         result = self.node.command_wait(command.command_id, remaining)
         if result is None or result.state != CommandState.SUCCEEDED:
             logger.error('PostgreSQL did not stop before agent shutdown')
+            self._fence_postgres(timeout)
+
+    def _fence_postgres(self, timeout: float) -> None:
+        """Force PostgreSQL down when graceful shutdown cannot finish."""
+        try:
+            if not self.node.fence(timeout):
+                logger.error('PostgreSQL fencing failed during agent shutdown')
+        except Exception:
+            logger.exception('PostgreSQL fencing failed during agent shutdown')
 
 
 def _reject_dcs(config: _ConfigView) -> None:

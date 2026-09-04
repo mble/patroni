@@ -4,7 +4,7 @@ from threading import Event, Thread
 from uuid import uuid4
 
 from patroni.control import BootstrapState, CallbackKind, CloneMode, \
-    CommandKind, CommandState, DesiredRole, DivergencePolicy
+    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy
 from patroni.control.commands import AckState, AgentCommands, CheckpointMode, \
     CommandDriver, CommandResult, CommandValue, DriverResult, EventChannel, \
     EventKind, EventRecord, LifecycleCommand, ReloadMode, StopMode, SubmitState
@@ -41,6 +41,23 @@ class FakeDriver(CommandDriver):
         self.fence_entered.set()
         self.fence_release.wait(1)
         return True
+
+
+class AckDriver(CommandDriver):
+
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.completed = Event()
+
+    def run(self, command, events, cancelled):
+        event = events.publish(EventKind.SAFEPOINT)
+        self.entered.set()
+        events.wait_ack(event.sequence, 5, cancelled)
+        self.completed.set()
+        return DriverResult(CommandValue.TRUE, None, None, ())
+
+    def cancel(self) -> None:
+        pass
 
 
 def command(command_id=None, kind=CommandKind.STOP):
@@ -93,6 +110,23 @@ class TestAgentCommands(unittest.TestCase):
         self.assertEqual(10, result.previous_location)
         self.assertIsNone(self.commands.active())
 
+    def test_executor_reports_command_phases(self) -> None:
+        phases = []
+        self.commands.bind_phase(
+            lambda command_id, phase: phases.append((command_id, phase)) or True,
+        )
+        request = command()
+        self.commands.submit(request)
+        self.assertTrue(self.driver.entered.wait(1))
+        self.driver.release.set()
+        self.commands.wait(request.command_id, 1)
+
+        self.assertEqual([
+            (request.command_id, CommandPhase.PREPARING),
+            (request.command_id, CommandPhase.MUTATING),
+            (request.command_id, CommandPhase.FINALIZING),
+        ], phases)
+
     def test_busy_submission_is_rejected(self) -> None:
         first = command()
         second = command()
@@ -134,6 +168,20 @@ class TestAgentCommands(unittest.TestCase):
 
         self.assertTrue(self.driver.cancelled.is_set())
         self.assertEqual(CommandState.CANCELLED, result.state)
+
+    def test_cancel_wakes_event_ack_wait(self) -> None:
+        driver = AckDriver()
+        commands = AgentCommands(driver)
+        request = command()
+        commands.submit(request)
+        self.assertTrue(driver.entered.wait(1))
+
+        commands.cancel(request.command_id)
+        responsive = driver.completed.wait(0.2)
+        commands.ack(request.command_id, 1)
+        commands.close()
+
+        self.assertTrue(responsive)
 
     def test_fence_preempts_active_command(self) -> None:
         request = command()

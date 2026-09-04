@@ -20,3 +20,9 @@ def test_rollout_selects_split_replica() -> None:
     script = ROLLOUT.read_text()
 
     assert 'test -d /etc/service/patroni-agent' in script
+
+
+def test_rollout_checks_installed_agent() -> None:
+    script = ROLLOUT.read_text()
+
+    assert '^/usr/bin/python3 /usr/local/bin/patroni-agent ' in script

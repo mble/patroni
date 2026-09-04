@@ -5,8 +5,10 @@ on:
     paths:
       - '.github/workflows/role-images.yaml'
       - 'kubernetes/controller-agent/**'
+      - 'kubernetes/controller-agent-acceptance/**'
       - 'patroni/**'
       - 'scripts/integration/*role-images.sh'
+      - 'scripts/integration/controller-agent-kubernetes.sh'
       - 'setup.py'
   push:
     branches:
@@ -15,8 +17,10 @@ on:
     paths:
       - '.github/workflows/role-images.yaml'
       - 'kubernetes/controller-agent/**'
+      - 'kubernetes/controller-agent-acceptance/**'
       - 'patroni/**'
       - 'scripts/integration/*role-images.sh'
+      - 'scripts/integration/controller-agent-kubernetes.sh'
       - 'setup.py'
 
 permissions:
@@ -49,6 +53,16 @@ jobs:
 
       - name: Scan images
         run: scripts/integration/scan-role-images.sh
+
+      - name: Start Kubernetes
+        uses: nolar/setup-k3d-k3s@62c9d1bd2bc843275c85d2e7dcd696edc1160eee # v1
+        with:
+          version: v1.35.5-k3s1
+          k3d-tag: v5.9.0
+          k3d-name: controller-agent
+
+      - name: Check Kubernetes deployment
+        run: scripts/integration/controller-agent-kubernetes.sh
 
       - name: Upload reports
         if: always()

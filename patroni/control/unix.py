@@ -1,4 +1,4 @@
-"""Bounded one-request Unix transport."""
+"""Bounded persistent Unix transport."""
 import logging
 import os
 import socket
@@ -18,6 +18,7 @@ DEFAULT_SOCKET_MODE = 0o600
 DEFAULT_TIMEOUT = 5.0
 STALE_CONNECT_TIMEOUT = 0.1
 UNSAFE_WORLD_BITS = stat.S_IWOTH
+ROOT_UID = 0
 
 
 def peer_check(expected_uid: Optional[int] = None,
@@ -39,7 +40,7 @@ def peer_check(expected_uid: Optional[int] = None,
 
 
 class UnixServer:
-    """Serve one bounded request per local connection."""
+    """Serve bounded requests over persistent local connections."""
 
     def __init__(self, path: str, handler: Callable[[object], Response],
                  verify_peer: Optional[Callable[[socket.socket], None]] = None,
@@ -109,6 +110,10 @@ class UnixServer:
             except OSError:
                 if not self._closed.is_set():
                     logger.exception('Control socket accept failed')
+                    listener.close()
+                    _unlink_owned(self._path, self._inode)
+                    self._listener = None
+                    self._inode = None
                 return
             if self._closed.is_set():
                 stream.close()
@@ -169,7 +174,11 @@ def _path(path: str, socket_mode: int) -> None:
         raise ValueError('control socket path must be canonical and absolute')
     parent = os.path.dirname(path)
     parent_stat = os.stat(parent, follow_symlinks=False)
-    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.geteuid():
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ValueError('control socket parent is unsafe')
+    if parent_stat.st_uid not in (ROOT_UID, os.geteuid()):
+        raise ValueError('control socket parent is unsafe')
+    if parent_stat.st_uid != os.geteuid() and not parent_stat.st_mode & stat.S_IWGRP:
         raise ValueError('control socket parent is unsafe')
     if parent_stat.st_mode & UNSAFE_WORLD_BITS:
         raise ValueError('control socket parent is world-writable')

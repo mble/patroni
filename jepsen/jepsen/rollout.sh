@@ -108,6 +108,6 @@ ssh "$NODE" 'sv up patroni-controller'
 wait_member
 test "$(system_id)" = "$SYSTEM_ID"
 ssh "$NODE" "pgrep -f \
-    '^/usr/bin/python3 -m patroni.agent /home/postgres/agent.yml$'" >/dev/null
+    '^/usr/bin/python3 /usr/local/bin/patroni-agent /home/postgres/agent.yml$'" >/dev/null
 
 echo "Rollout and rollback preserved $NODE PGDATA"

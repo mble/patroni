@@ -4,7 +4,7 @@ import json
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from threading import RLock
+from threading import Lock, RLock
 from typing import Callable, cast, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TYPE_CHECKING
 from uuid import UUID
 
@@ -308,7 +308,9 @@ class InProcessNodeControl(NodeControl):
         self._recovery = recovery
         self._replication = replication
         self._lock = RLock()
+        self._snapshot_locks = {detail: Lock() for detail in SnapshotDetail}
         self._sequence = 0
+        self._cache_generation = 0
         self._cache: Dict[SnapshotDetail, NodeSnapshot] = {}
 
     def snapshot(self, detail: SnapshotDetail, freshness: Freshness,
@@ -318,20 +320,26 @@ class InProcessNodeControl(NodeControl):
         _enum(freshness, Freshness, 'freshness')
         _context(context)
 
-        with self._lock:
-            cached = self._cache.get(detail)
-            if freshness == Freshness.CACHED and cached:
-                return cached
+        with self._snapshot_locks[detail]:
+            with self._lock:
+                cached = self._cache.get(detail)
+                if freshness == Freshness.CACHED and cached:
+                    return cached
 
-            self._sequence += 1
+                self._sequence += 1
+                sequence = self._sequence
+                generation = self._cache_generation
             query_mode = QueryMode.RETRY if freshness == Freshness.FRESH_RETRY else QueryMode.ONCE
             attempts = MAX_CONSISTENCY_ATTEMPTS if freshness == Freshness.FRESH_RETRY else 1
-            snapshot = self._collect(detail, context, query_mode, attempts)
-            self._cache[detail] = snapshot
+            snapshot = self._collect(sequence, detail, context, query_mode, attempts)
+            with self._lock:
+                if generation == self._cache_generation:
+                    self._cache[detail] = snapshot
             return snapshot
 
     def invalidate(self) -> None:
         with self._lock:
+            self._cache_generation += 1
             self._cache.clear()
             self._observer.invalidate()
 
@@ -498,7 +506,7 @@ class InProcessNodeControl(NodeControl):
 
         return self._replication
 
-    def _collect(self, detail: SnapshotDetail, context: ObservationContext,
+    def _collect(self, sequence: int, detail: SnapshotDetail, context: ObservationContext,
                  query_mode: QueryMode, attempts: int) -> NodeSnapshot:
         before = self._observer.read(detail)
         for _ in range(attempts):
@@ -506,22 +514,22 @@ class InProcessNodeControl(NodeControl):
                 row = self._observer.query_status(query_mode) \
                     if detail == SnapshotDetail.STATUS and before.state in QUERY_STATES else None
             except (Error, PostgresConnectionException, RetryFailedError):
-                return self._failed(detail, before, ObservationFailure.QUERY_FAILED)
+                return self._failed(sequence, detail, before, ObservationFailure.QUERY_FAILED)
 
             after = self._observer.read(detail)
             if before == after:
-                return self._build(detail, context, before, row)
+                return self._build(sequence, detail, context, before, row)
 
             before = self._observer.read(detail)
 
-        return self._failed(detail, before, ObservationFailure.INCONSISTENT)
+        return self._failed(sequence, detail, before, ObservationFailure.INCONSISTENT)
 
-    def _build(self, detail: SnapshotDetail, context: ObservationContext,
+    def _build(self, sequence: int, detail: SnapshotDetail, context: ObservationContext,
                local: LocalPostgres, row: Optional[Sequence[object]]) -> NodeSnapshot:
         if row is None:
-            return self._snapshot(detail, local, local.observed_role, local.state)
+            return self._snapshot(sequence, detail, local, local.observed_role, local.state)
         if len(row) != 12:
-            return self._failed(detail, local, ObservationFailure.QUERY_FAILED)
+            return self._failed(sequence, detail, local, ObservationFailure.QUERY_FAILED)
 
         role = PostgresRole.PRIMARY if bool(row[1]) else PostgresRole.REPLICA
         is_primary = role == PostgresRole.PRIMARY
@@ -536,13 +544,14 @@ class InProcessNodeControl(NodeControl):
 
         replication = _replication(row[11])
         if replication is None:
-            return self._failed(detail, local, ObservationFailure.LIMIT_EXCEEDED)
+            return self._failed(sequence, detail, local, ObservationFailure.LIMIT_EXCEEDED)
 
         receiver_state = row[8] if isinstance(row[8], str) else None
         restore_command = row[9] if isinstance(row[9], str) else None
         replication_state = self._observer.replication_state(role, receiver_state, restore_command)
 
         return self._snapshot(
+            sequence,
             detail,
             local,
             role,
@@ -556,13 +565,13 @@ class InProcessNodeControl(NodeControl):
             server_version=self._observer.server_version(),
         )
 
-    def _failed(self, detail: SnapshotDetail, local: LocalPostgres,
+    def _failed(self, sequence: int, detail: SnapshotDetail, local: LocalPostgres,
                 failure: ObservationFailure) -> NodeSnapshot:
         state = PostgresState.UNKNOWN if local.state in QUERY_STATES else local.state
         role = PostgresRole.UNKNOWN if local.state in QUERY_STATES else local.observed_role
-        return self._snapshot(detail, local, role, state, failure=failure)
+        return self._snapshot(sequence, detail, local, role, state, failure=failure)
 
-    def _snapshot(self, detail: SnapshotDetail, local: LocalPostgres,
+    def _snapshot(self, sequence: int, detail: SnapshotDetail, local: LocalPostgres,
                   role: PostgresRole, state: PostgresState,
                   timeline: Optional[int] = None, wal: WalObservation = EMPTY_WAL,
                   latest_end_lsn: Optional[int] = None,
@@ -573,7 +582,7 @@ class InProcessNodeControl(NodeControl):
                   failure: ObservationFailure = ObservationFailure.NONE) -> NodeSnapshot:
         return NodeSnapshot(
             self._agent_boot_id,
-            self._sequence,
+            sequence,
             self._clock(),
             detail,
             role,

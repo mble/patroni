@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: patroni-split
+spec:
+  template:
+    spec:
+      containers:
+        - name: controller
+          # Keep Patroni below PID 1 so acceptance faults can stop it.
+          command: [/usr/bin/python3, -c]
+          args:
+            - |
+              import subprocess
+              import sys
+
+              command = [
+                  "/usr/bin/python3",
+                  "-m",
+                  "patroni.controller",
+                  "/etc/patroni/controller.yml",
+              ]
+              sys.exit(subprocess.call(command))
+          livenessProbe:
+            failureThreshold: 10

@@ -105,6 +105,19 @@ class TestSafetyState(unittest.TestCase):
         self.grant(sequence=2)
         self.assertEqual(SafetyAction.RUN, self.state.submit(self.command(sequence=3)).action)
 
+    def test_primary_commands_reject_false_target(self) -> None:
+        cases = (
+            (CommandKind.PROMOTE, DesiredRole.REPLICA),
+            (CommandKind.BOOTSTRAP, DesiredRole.REPLICA),
+            (CommandKind.POST_BOOTSTRAP, DesiredRole.UNCHANGED),
+            (CommandKind.START, DesiredRole.UNCHANGED),
+            (CommandKind.RESTART, DesiredRole.UNCHANGED),
+        )
+
+        for kind, target in cases:
+            with self.subTest(kind=kind), self.assertRaises(ValidationError):
+                self.state.submit(self.command(kind, sequence=1, target=target))
+
     def test_commands_fail_closed_without_authority(self) -> None:
         cases = {
             CommandKind.START: (DesiredRole.PRIMARY, SafetyAction.REJECT),

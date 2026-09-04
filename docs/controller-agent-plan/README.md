@@ -70,6 +70,7 @@ etcd v2, and qualification of other DCS implementations.
 | [M10](milestones/10-rollout.md) | Complete: parity, rollout, and rollback |
 | [M11](milestones/11-performance.md) | Complete: split-process performance pass |
 | [M12](milestones/12-minimal-images.md) | Complete: minimal runtime images |
+| [M13](milestones/13-review-hardening.md) | Local qualification complete; merge-revision CI pending |
 
 Complete milestones in order. Each requires correctness, security, and
 performance review before merge. Remediation repeats affected reviews.

@@ -53,6 +53,31 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: prepare-control
+          image: patroni-agent:latest
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - chown 0:999 /run/patroni && chmod 0770 /run/patroni
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: control
+              mountPath: /run/patroni
       containers:
         - name: agent
           image: patroni-agent:latest

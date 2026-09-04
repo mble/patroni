@@ -34,6 +34,15 @@ INITIALIZER_PRIMARY_COMMANDS = frozenset((
     CommandKind.SET_BOOTSTRAP,
     CommandKind.CHECKPOINT,
 ))
+PRIMARY_TARGET_COMMANDS = frozenset((
+    CommandKind.START,
+    CommandKind.PROMOTE,
+    CommandKind.BOOTSTRAP,
+    CommandKind.POST_BOOTSTRAP,
+))
+EXPLICIT_TARGET_COMMANDS = frozenset((
+    CommandKind.RESTART,
+))
 PHASE_ORDER = {
     CommandPhase.ACCEPTED: 0,
     CommandPhase.PREPARING: 1,
@@ -180,6 +189,14 @@ class SafetyState:
         self._agent_state = AgentState.IDLE
         self._trim_history()
         return SafetyAction.NONE
+
+    def abort(self, command_id: str) -> None:
+        """Discard a command which the executor did not accept."""
+        self._active(command_id)
+
+        del self._commands[command_id]
+        self._active_command_id = None
+        self._agent_state = AgentState.IDLE
 
     def command(self, command_id: str) -> CommandStatus:
         """Return retained command state."""
@@ -357,6 +374,12 @@ class SafetyState:
         _authority_term(request.authority_term)
         _enum(request.kind, CommandKind, 'command kind')
         _enum(request.target_role, DesiredRole, 'desired role')
+        if request.kind in PRIMARY_TARGET_COMMANDS and request.target_role != DesiredRole.PRIMARY:
+            raise ValidationError('command requires primary target role')
+        if request.kind in EXPLICIT_TARGET_COMMANDS \
+                and request.target_role == DesiredRole.UNCHANGED \
+                and self._policy_mode != PolicyMode.PAUSED:
+            raise ValidationError('command requires explicit target role')
 
         return self._fingerprint(request)
 

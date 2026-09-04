@@ -3,9 +3,14 @@ set -euo pipefail
 
 readonly WAIT_ATTEMPTS=120
 readonly WAIT_SECONDS=1
-readonly ETCD_TIMEOUT=1s
+readonly FENCE_WAIT_ATTEMPTS=45
+readonly SMOKE_ETCD_PORT="${SMOKE_ETCD_PORT:-52379}"
+readonly SMOKE_ETCD_PEER_PORT="${SMOKE_ETCD_PEER_PORT:-52380}"
+readonly ETCD_MEMBER=smoke
+readonly ETCD_HEALTH_URL="http://127.0.0.1:${SMOKE_ETCD_PORT}/health"
 readonly POSTGRES_PORT=55432
 readonly REST_PORT=58008
+readonly SMOKE_PYTHON_BIN="${SMOKE_PYTHON_BIN:-python3}"
 REPO_DIR="$(dirname "$(dirname "$(dirname "$0")")")"
 readonly REPO_DIR
 
@@ -24,8 +29,12 @@ readonly ETCD_LOG="${RUN_DIR}/etcd.log"
 agent_pid=''
 controller_pid=''
 etcd_pid=''
+controller_paused=''
 
 cleanup() {
+    if [[ -n "${controller_paused}" && -n "${controller_pid}" ]]; then
+        kill -CONT "${controller_pid}" 2>/dev/null || true
+    fi
     if [[ -n "${controller_pid}" ]]; then
         kill "${controller_pid}" 2>/dev/null || true
         wait "${controller_pid}" 2>/dev/null || true
@@ -48,19 +57,28 @@ if [[ "$(uname -m)" == 'aarch64' ]]; then
 fi
 
 etcd --data-dir "${RUN_DIR}/etcd" \
-    --advertise-client-urls http://127.0.0.1:2379 \
-    --listen-client-urls http://127.0.0.1:2379 >"${ETCD_LOG}" 2>&1 &
+    --name "${ETCD_MEMBER}" \
+    --advertise-client-urls "http://127.0.0.1:${SMOKE_ETCD_PORT}" \
+    --listen-client-urls "http://127.0.0.1:${SMOKE_ETCD_PORT}" \
+    --initial-advertise-peer-urls "http://127.0.0.1:${SMOKE_ETCD_PEER_PORT}" \
+    --initial-cluster "${ETCD_MEMBER}=http://127.0.0.1:${SMOKE_ETCD_PEER_PORT}" \
+    --listen-peer-urls "http://127.0.0.1:${SMOKE_ETCD_PEER_PORT}" >"${ETCD_LOG}" 2>&1 &
 etcd_pid=$!
 
 for ((attempt = 0; attempt < WAIT_ATTEMPTS; attempt++)); do
-    if ETCDCTL_API=3 etcdctl --dial-timeout="${ETCD_TIMEOUT}" \
-        --command-timeout="${ETCD_TIMEOUT}" endpoint health >/dev/null 2>&1; then
+    if ! kill -0 "${etcd_pid}" 2>/dev/null; then
+        cat "${ETCD_LOG}"
+        exit 1
+    fi
+    if curl --fail --silent --max-time "${WAIT_SECONDS}" "${ETCD_HEALTH_URL}" \
+            | grep --quiet true; then
         break
     fi
     sleep "${WAIT_SECONDS}"
 done
-if ! ETCDCTL_API=3 etcdctl --dial-timeout="${ETCD_TIMEOUT}" \
-    --command-timeout="${ETCD_TIMEOUT}" endpoint health >/dev/null 2>&1; then
+if ! kill -0 "${etcd_pid}" 2>/dev/null \
+        || ! curl --fail --silent --max-time "${WAIT_SECONDS}" "${ETCD_HEALTH_URL}" \
+        | grep --quiet true; then
     cat "${ETCD_LOG}"
     exit 1
 fi
@@ -105,7 +123,7 @@ restapi:
   listen: 127.0.0.1:${REST_PORT}
   connect_address: 127.0.0.1:${REST_PORT}
 etcd3:
-  host: 127.0.0.1:2379
+  host: 127.0.0.1:${SMOKE_ETCD_PORT}
 postgresql:
   connect_address: 127.0.0.1:${POSTGRES_PORT}
 controller:
@@ -122,7 +140,7 @@ bootstrap:
       use_slots: true
 EOF
 
-python3 -m patroni.agent "${AGENT_CONFIG}" >"${AGENT_LOG}" 2>&1 &
+"${SMOKE_PYTHON_BIN}" -m patroni.agent "${AGENT_CONFIG}" >"${AGENT_LOG}" 2>&1 &
 agent_pid=$!
 
 for ((attempt = 0; attempt < WAIT_ATTEMPTS; attempt++)); do
@@ -140,7 +158,7 @@ if [[ ! -S "${SOCKET_PATH}" ]]; then
     exit 1
 fi
 
-python3 -m patroni.controller "${CONTROLLER_CONFIG}" >"${CONTROLLER_LOG}" 2>&1 &
+"${SMOKE_PYTHON_BIN}" -m patroni.controller "${CONTROLLER_CONFIG}" >"${CONTROLLER_LOG}" 2>&1 &
 controller_pid=$!
 
 for ((attempt = 0; attempt < WAIT_ATTEMPTS; attempt++)); do
@@ -167,5 +185,22 @@ psql --host=127.0.0.1 --port="${POSTGRES_PORT}" --username=postgres \
 
 curl --fail --silent "http://127.0.0.1:${REST_PORT}/metrics" \
     | grep --quiet 'patroni_agent_connected.* 1.0'
+
+# A stopped controller cannot extend primary authority.
+kill -STOP "${controller_pid}"
+controller_paused=1
+for ((attempt = 0; attempt < FENCE_WAIT_ATTEMPTS; attempt++)); do
+    if ! pg_isready --host=127.0.0.1 --port="${POSTGRES_PORT}" >/dev/null 2>&1; then
+        break
+    fi
+    sleep "${WAIT_SECONDS}"
+done
+if pg_isready --host=127.0.0.1 --port="${POSTGRES_PORT}" >/dev/null 2>&1; then
+    cat "${AGENT_LOG}"
+    cat "${CONTROLLER_LOG}"
+    exit 1
+fi
+kill -CONT "${controller_pid}"
+controller_paused=''
 
 echo 'controller-agent smoke passed'

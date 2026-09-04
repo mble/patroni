@@ -3,7 +3,7 @@
 ## Transport
 
 - Linux `AF_UNIX`.
-- One request and response per connection.
+- Separate persistent connections for ordered control and read-only status.
 - Fixed header: magic, major version, minor version, payload length.
 - Network byte order.
 - Bounded UTF-8 JSON body.
@@ -24,10 +24,13 @@ Every request contains:
 - Operation enum.
 - Controller boot ID.
 - Agent boot ID after handshake.
-- Monotonic sequence.
+- Sequence number.
 - Typed body.
 
 Every command additionally contains its command ID and required authority.
+Control sequences increase monotonically. Status snapshots are unordered and
+cannot mutate agent state; this prevents slow SQL observations from delaying
+authority grants or lifecycle commands.
 
 ## Operations
 

@@ -8,10 +8,11 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from enum import Enum
 from threading import Condition, Event, Lock, RLock, Thread
-from typing import cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
+from typing import Callable, cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
-from .models import CommandKind, CommandState, DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, SlotTags
+from .models import CommandKind, CommandPhase, CommandState, DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, \
+    SlotTags
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +379,11 @@ class EventChannel:
 
             return AckState.ACKED
 
+    def wake(self) -> None:
+        """Wake acknowledgement waits after external cancellation."""
+        with self._changed:
+            self._changed.notify_all()
+
 
 class CommandDriver(ABC):
     """Execute lifecycle commands below the agent service."""
@@ -423,6 +429,14 @@ class AgentCommands:
         self._fence_done.set()
         self._fence_lock = Lock()
         self._fence_workers = 0
+        self._phase_sink: Optional[Callable[[str, CommandPhase], bool]] = None
+
+    def bind_phase(self, sink: Callable[[str, CommandPhase], bool]) -> None:
+        """Bind the safety phase observer before command execution."""
+        with self._lock:
+            if self._phase_sink is not None:
+                raise RuntimeError('command phase observer is already bound')
+            self._phase_sink = sink
 
     def submit(self, command: LifecycleCommand) -> CommandSubmission:
         _command(command)
@@ -492,6 +506,7 @@ class AgentCommands:
                 return entry.result
 
             entry.cancelled.set()
+            entry.events.wake()
             entry.result = CommandResult(
                 entry.result.request, CommandState.CANCELLED, CommandValue.NONE, None, None, (),
             )
@@ -530,6 +545,7 @@ class AgentCommands:
                 entry = self._entries.get(self._active) if self._active else None
                 if entry:
                     entry.cancelled.set()
+                    entry.events.wake()
                     entry.fence_pending = True
                     self._fence_workers += 1
                     entry.result = CommandResult(
@@ -549,9 +565,18 @@ class AgentCommands:
 
     def _run(self, entry: _Entry) -> None:
         try:
-            driver_result = self._driver.run(entry.result.request, entry.events, entry.cancelled)
-            _driver_result(driver_result)
-            state = CommandState.SUCCEEDED if driver_result.value != CommandValue.FALSE else CommandState.FAILED
+            if not self._phase(entry, CommandPhase.PREPARING) \
+                    or not self._phase(entry, CommandPhase.MUTATING):
+                driver_result = DriverResult(CommandValue.NONE, None, None, ())
+                state = CommandState.FENCED
+            else:
+                driver_result = self._driver.run(entry.result.request, entry.events, entry.cancelled)
+                _driver_result(driver_result)
+                state = CommandState.SUCCEEDED \
+                    if driver_result.value != CommandValue.FALSE else CommandState.FAILED
+                if not self._phase(entry, CommandPhase.FINALIZING):
+                    driver_result = DriverResult(CommandValue.NONE, None, None, ())
+                    state = CommandState.FENCED
         except Exception:
             logger.exception('Agent command %s failed', entry.result.request.kind.value)
             driver_result = DriverResult(CommandValue.NONE, None, None, ())
@@ -588,6 +613,12 @@ class AgentCommands:
             if self._fencing.is_set() and self._fence_done.is_set() and self._fence_workers == 0:
                 self._fencing.clear()
             self._trim()
+
+    def _phase(self, entry: _Entry, phase: CommandPhase) -> bool:
+        with self._lock:
+            sink = self._phase_sink
+
+        return sink(entry.result.request.command_id, phase) if sink is not None else True
 
     def _trim(self) -> None:
         while len(self._entries) > MAX_COMMAND_HISTORY:

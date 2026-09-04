@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from patroni.agent import _control_config, _reject_dcs, DCS_SECTIONS, PatroniAgent
 from patroni.agent_supervisor import AgentSupervisor, main as supervisor_main, SIGNAL_EXIT_OFFSET
-from patroni.control import CommandKind, CommandState, PolicyMode, SubmitState
+from patroni.control import CommandKind, CommandPhase, CommandState, PolicyMode, SubmitState
 from patroni.exceptions import PatroniFatalException
 
 
@@ -85,6 +85,7 @@ class TestPatroniAgent(unittest.TestCase):
         agent.node = Mock()
         agent.config = {'retry_timeout': 1}
         agent._policy = PolicyMode.ACTIVE
+        agent._stopping = Mock()
         agent.node.active_command.return_value = None
         agent.node.submit.return_value = Mock(state=SubmitState.ACCEPTED)
         agent.node.command_wait.return_value = Mock(state=CommandState.SUCCEEDED)
@@ -96,12 +97,50 @@ class TestPatroniAgent(unittest.TestCase):
         agent.node.disable_watchdog.assert_called_once_with()
         agent.node.close.assert_called_once_with()
 
+    def test_shutdown_stop_bypasses_stale_phase(self) -> None:
+        agent = object.__new__(PatroniAgent)
+        agent._stopping = Mock(is_set=Mock(return_value=True))
+        agent._rpc = Mock()
+        agent.node = Mock()
+        agent.node.command_status.return_value = Mock(request=Mock(kind=CommandKind.STOP))
+
+        allowed = agent._command_phase('shutdown-command', CommandPhase.MUTATING)
+
+        self.assertTrue(allowed)
+        agent._rpc.phase.assert_not_called()
+
+    def test_shutdown_fences_after_cancel_timeout(self) -> None:
+        agent = object.__new__(PatroniAgent)
+        agent.node = Mock()
+        agent.config = {'retry_timeout': 0}
+        active = Mock()
+        active.request.command_id = 'active-command'
+        agent.node.active_command.return_value = active
+
+        agent._stop_postgres()
+
+        agent.node.command_cancel.assert_called_once_with('active-command')
+        agent.node.fence.assert_called_once_with(0.0)
+
+    def test_shutdown_fences_after_stop_failure(self) -> None:
+        agent = object.__new__(PatroniAgent)
+        agent.node = Mock()
+        agent.config = {'retry_timeout': 1}
+        agent.node.active_command.return_value = None
+        agent.node.submit.return_value = Mock(state=SubmitState.ACCEPTED)
+        agent.node.command_wait.return_value = Mock(state=CommandState.FAILED)
+
+        agent._stop_postgres()
+
+        agent.node.fence.assert_called_once_with(1.0)
+
     def test_paused_shutdown_preserves_postgres(self) -> None:
         agent = object.__new__(PatroniAgent)
         agent.authority = Mock()
         agent._server = Mock()
         agent.node = Mock()
         agent._policy = PolicyMode.PAUSED
+        agent._stopping = Mock()
 
         agent._shutdown()
 

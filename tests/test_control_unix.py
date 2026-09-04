@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -18,7 +19,7 @@ from patroni.control.config import config_plan
 from patroni.control.protocol import Capability, ErrorCode, Hello, \
     PROTOCOL_MAJOR, PROTOCOL_MINOR, ProtocolError, Response
 from patroni.control.rpc import AgentClient, AgentRpc
-from patroni.control.unix import peer_check, UnixServer
+from patroni.control.unix import _path, peer_check, UnixServer
 
 
 def observation_trace(node):
@@ -92,6 +93,37 @@ class TestControlUnix(unittest.TestCase):
 
         self.assertEqual(1, server_peer.call_count)
         self.assertEqual(1, client_peer.call_count)
+
+    def test_status_snapshot_does_not_block_ha(self) -> None:
+        entered = Event()
+        release = Event()
+        completed = Event()
+
+        def snapshot(*args):
+            entered.set()
+            release.wait(1)
+            raise RuntimeError('status unavailable')
+
+        self.node.snapshot.side_effect = snapshot
+        self.server.start()
+        client = AgentClient(self.path, peer_check=allow_peer)
+        status = Thread(target=client.snapshot, args=(
+            SnapshotDetail.STATUS,
+            Freshness.FRESH_RETRY,
+            ObservationContext(None),
+        ))
+        status.start()
+        self.assertTrue(entered.wait(1))
+        ha = Thread(target=lambda: (client.is_running(), completed.set()))
+        ha.start()
+
+        responsive = completed.wait(0.2)
+        release.set()
+        status.join(1)
+        ha.join(1)
+        client.close()
+
+        self.assertTrue(responsive)
 
     def test_client_rejects_minor_skew(self) -> None:
         hello = Hello(
@@ -194,6 +226,17 @@ class TestControlUnix(unittest.TestCase):
 
         self.assertTrue(stat_is_socket(self.path))
 
+    def test_accept_failure_removes_socket(self) -> None:
+        socket_file = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        socket_file.bind(self.path)
+        self.server._listener = Mock(accept=Mock(side_effect=OSError('failed')))
+        self.server._inode = os.lstat(self.path).st_ino
+
+        self.server._serve()
+        socket_file.close()
+
+        self.assertFalse(os.path.exists(self.path))
+
     def test_regular_file_is_not_removed(self) -> None:
         Path(self.path).write_text('keep')
 
@@ -201,6 +244,24 @@ class TestControlUnix(unittest.TestCase):
             self.server.start()
 
         self.assertEqual('keep', Path(self.path).read_text())
+
+    @patch('patroni.control.unix.os.getegid', Mock(return_value=999))
+    @patch('patroni.control.unix.os.geteuid', Mock(return_value=999))
+    @patch('patroni.control.unix.os.stat')
+    def test_root_owned_group_directory_is_safe(self, mock_stat) -> None:
+        parent = Mock(st_mode=0o040770, st_uid=0, st_gid=999)
+        mock_stat.return_value = parent
+
+        _path('/run/patroni/agent.sock', 0o660)
+
+        parent.st_gid = 1000
+        with self.assertRaises(ValueError):
+            _path('/run/patroni/agent.sock', 0o660)
+
+        parent.st_gid = 999
+        parent.st_mode = 0o040750
+        with self.assertRaises(ValueError):
+            _path('/run/patroni/agent.sock', 0o660)
 
     def test_symlink_is_not_removed(self) -> None:
         target = self.directory / 'target'

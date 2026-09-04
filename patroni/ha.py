@@ -1045,7 +1045,7 @@ class Ha(object):
                 and not self.node.recovery_conf_exists():
             # We know 100% that we were running as a primary a few moments ago, therefore could just start postgres
             msg = 'starting primary after failure'
-            command = self._lifecycle(CommandKind.START, timeout=timeout)
+            command = self._lifecycle(CommandKind.START, DesiredRole.PRIMARY, timeout=timeout)
             if self._async_executor.try_run_async(msg, self._run_command, args=(command,)) is None:
                 self.recovering = True
                 return msg
@@ -2534,9 +2534,22 @@ class Ha(object):
         def after_start() -> None:
             self.notify_mpp_coordinator('after_promote')
 
+        # Active policy binds restart role to current HA authority.
+        has_lock = self.has_lock()
+        role = DesiredRole.UNCHANGED
+        if not self.is_paused():
+            role = DesiredRole.REPLICA
+            if has_lock:
+                role = DesiredRole.STANDBY_LEADER if self.is_standby_cluster() else DesiredRole.PRIMARY
+
         # For non async cases we want to wait for restart to complete or timeout before returning.
-        events = (EventKind.BEFORE_SHUTDOWN, EventKind.AFTER_START) if self.has_lock() else ()
-        command = self._lifecycle(CommandKind.RESTART, timeout=timeout, events=events)
+        events = (EventKind.BEFORE_SHUTDOWN, EventKind.AFTER_START) if has_lock else ()
+        command = self._lifecycle(
+            CommandKind.RESTART,
+            role,
+            timeout=timeout,
+            events=events,
+        )
 
         def handle_event(event: EventRecord) -> None:
             if event.kind == EventKind.BEFORE_SHUTDOWN:

@@ -7,10 +7,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_DIR = ROOT / 'kubernetes' / 'controller-agent'
+ACCEPTANCE_DIR = ROOT / 'kubernetes' / 'controller-agent-acceptance'
 CONTROLLER_UID = 65532
 AGENT_UID = 999
 CONTROLLER_GID = CONTROLLER_UID
 AGENT_GID = AGENT_UID
+CONTROL_MODE = '0770'
 SOCKET_WORKERS = 2
 POSTGRES_PORT = 5432
 REST_PORT = 8008
@@ -57,6 +59,7 @@ class TestRoleImages(unittest.TestCase):
         stateful_set = next(document for document in documents if document.get('kind') == 'StatefulSet')
         template = stateful_set['spec']['template']['spec']
         containers = {container['name']: container for container in template['containers']}
+        init_containers = {container['name']: container for container in template['initContainers']}
 
         self.assertFalse(template['automountServiceAccountToken'])
         self.assertEqual(AGENT_GID, template['securityContext']['fsGroup'])
@@ -66,6 +69,12 @@ class TestRoleImages(unittest.TestCase):
         self.assertEqual(CONTROLLER_UID, containers['controller']['securityContext']['runAsUser'])
         self.assertEqual(CONTROLLER_GID, containers['controller']['securityContext']['runAsGroup'])
         self.assertNotEqual(containers['agent']['image'], containers['controller']['image'])
+
+        control_init = init_containers['prepare-control']
+        self.assertEqual(containers['agent']['image'], control_init['image'])
+        self.assertEqual(0, control_init['securityContext']['runAsUser'])
+        self.assertIn('chmod {0} /run/patroni'.format(CONTROL_MODE), control_init['args'][0])
+        self.assertEqual({'CHOWN'}, set(control_init['securityContext']['capabilities']['add']))
 
         ports = {
             name: {port['containerPort'] for port in container['ports']}
@@ -96,9 +105,24 @@ class TestRoleImages(unittest.TestCase):
         agent = agent_config['agent']
         controller = yaml.safe_load(_read('controller.yml'))['controller']
 
+        self.assertEqual('/var/lib/postgresql/data/pgdata', agent_config['postgresql']['data_dir'])
         self.assertEqual('/tmp', agent_config['postgresql']['parameters']['unix_socket_directories'])
         self.assertEqual(SOCKET_WORKERS, agent['max_workers'])
         self.assertEqual(CONTROLLER_UID, agent['peer_uid'])
         self.assertEqual(CONTROLLER_GID, agent['peer_gid'])
         self.assertEqual(AGENT_UID, controller['peer_uid'])
         self.assertEqual(AGENT_GID, controller['peer_gid'])
+
+    def test_acceptance_can_stop_controller(self) -> None:
+        patch = yaml.safe_load((ACCEPTANCE_DIR / 'statefulset-patch.yaml').read_text())
+        controller = patch['spec']['template']['spec']['containers'][0]
+
+        self.assertEqual(['/usr/bin/python3', '-c'], controller['command'])
+        self.assertIn('subprocess.call', controller['args'][0])
+
+    def test_acceptance_etcd_is_pinned(self) -> None:
+        documents = tuple(yaml.safe_load_all((ACCEPTANCE_DIR / 'etcd.yaml').read_text()))
+        deployment = next(document for document in documents if document.get('kind') == 'Deployment')
+        image = deployment['spec']['template']['spec']['containers'][0]['image']
+
+        self.assertIn('@sha256:', image)
