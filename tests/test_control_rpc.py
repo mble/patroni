@@ -4,10 +4,9 @@ from threading import Event, Thread
 from unittest.mock import Mock
 from uuid import uuid4
 
-from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, \
-    CloneMode, CommandKind, CommandPhase, CommandState, ConfigApply, DesiredRole, DivergencePolicy, \
-    DynamicConfigPlan, FenceReason, Freshness, ObservationContext, PolicyMode, PostgresRole, \
-    SafetyAction, SnapshotDetail, Timing
+from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, CloneMode, \
+    CommandKind, CommandPhase, CommandState, ConfigApply, DesiredRole, DivergencePolicy, DynamicConfigPlan, \
+    FenceReason, Freshness, ObservationContext, PolicyMode, PostgresRole, SafetyAction, SnapshotDetail, Timing
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.commands import CommandResult, CommandSubmission, \
     CommandValue, LifecycleCommand, ReloadMode, StopMode, SubmitState

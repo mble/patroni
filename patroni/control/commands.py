@@ -11,8 +11,8 @@ from threading import Condition, Event, Lock, RLock, Thread
 from typing import Callable, cast, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
-from .models import CommandKind, CommandPhase, CommandState, DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, \
-    SlotTags
+from .models import CommandKind, CommandPhase, CommandState, \
+    DesiredRole, SlotContext, SlotKind, SlotMember, SlotSpec, SlotTags
 
 logger = logging.getLogger(__name__)
 

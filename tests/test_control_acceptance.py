@@ -9,13 +9,12 @@ from pathlib import Path
 from threading import Thread
 from uuid import uuid4
 
-from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, \
-    CloneMode, CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy, \
-    Freshness, LocalPostgres, ObservationContext, PostgresRole, PostgresState, QueryMode, \
-    SnapshotDetail, TimelineWal, Timing
+from patroni.control import AuthorityGrant, AuthorityKind, BootstrapState, CheckpointMode, CloneMode, \
+    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy, Freshness, LocalPostgres, \
+    ObservationContext, PostgresRole, PostgresState, QueryMode, SnapshotDetail, TimelineWal, Timing
 from patroni.control.authority import AuthorityMonitor
-from patroni.control.commands import AgentCommands, CommandDriver, CommandValue, DriverResult, \
-    EventKind, LifecycleCommand, ReloadMode, StopMode, SubmitState
+from patroni.control.commands import AgentCommands, CommandDriver, CommandValue, \
+    DriverResult, EventKind, LifecycleCommand, ReloadMode, StopMode, SubmitState
 from patroni.control.node import InProcessNodeControl, PostgresObserver
 from patroni.control.rpc import AgentClient, AgentRpc
 from patroni.control.unix import UnixServer

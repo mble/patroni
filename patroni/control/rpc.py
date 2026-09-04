@@ -11,8 +11,8 @@ from uuid import UUID, uuid4
 
 from .commands import CancelMode, CommandResult, CommandSubmission, \
     EventRecord, LifecycleCommand, RecoveryTarget, SubmitState
-from .models import AgentState, AgentTelemetry, AuthorityGrant, AuthorityKind, CommandPhase, CommandRequest, \
-    CommandState, ConfigApply, ConfigChange, DynamicConfigPlan, FenceReason, Freshness, \
+from .models import AgentState, AgentTelemetry, AuthorityGrant, AuthorityKind, CommandPhase, \
+    CommandRequest, CommandState, ConfigApply, ConfigChange, DynamicConfigPlan, FenceReason, Freshness, \
     NodeSnapshot, ObservationContext, ObservationFailure, PolicyMode, PostgresRole, PostgresState, \
     RecoverySnapshot, SafetyAction, SlotCapabilities, SnapshotDetail, SyncContext, SyncSnapshot, \
     TimelineWal, Timing, WalObservation, WatchdogReload, WatchdogSnapshot, WatchdogTiming

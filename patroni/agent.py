@@ -4,13 +4,13 @@ import os
 import time
 
 from threading import Event
-from typing import Any, cast, Mapping, NamedTuple, Optional, Protocol, TYPE_CHECKING
+from typing import Any, cast, Mapping, NamedTuple, Optional, TYPE_CHECKING
 from uuid import uuid4
 
 from patroni import global_config, thread_pool
 from patroni.control import AgentCommands, BootstrapState, CheckpointMode, CloneMode, \
-    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy, InProcessNodeControl, \
-    LifecycleCommand, PolicyMode, ReloadMode, StopMode, SubmitState
+    CommandKind, CommandPhase, CommandState, DesiredRole, DivergencePolicy, \
+    InProcessNodeControl, LifecycleCommand, PolicyMode, ReloadMode, StopMode, SubmitState
 from patroni.control.authority import AuthorityMonitor
 from patroni.control.config import AgentConfigManager
 from patroni.control.postgres import LocalPostgresObserver
@@ -56,12 +56,6 @@ class _ControlConfig(NamedTuple):
     socket_mode: int
     peer_uid: Optional[int]
     peer_gid: Optional[int]
-
-
-class _ConfigView(Protocol):
-
-    def get(self, key: str, default: Any = None) -> Any:
-        ...
 
 
 class PatroniAgent(AbstractPatroniDaemon):
@@ -220,7 +214,7 @@ class PatroniAgent(AbstractPatroniDaemon):
             logger.exception('PostgreSQL fencing failed during agent shutdown')
 
 
-def _reject_dcs(config: _ConfigView) -> None:
+def _reject_dcs(config: Any) -> None:
     configured = sorted(section for section in DCS_SECTIONS if config.get(section))
     if configured:
         raise PatroniFatalException(
@@ -233,7 +227,7 @@ def _reject_dcs(config: _ConfigView) -> None:
         )
 
 
-def _control_config(config: _ConfigView) -> _ControlConfig:
+def _control_config(config: Any) -> _ControlConfig:
     raw = config.get('agent')
     if not isinstance(raw, Mapping):
         raise PatroniFatalException('agent configuration requires a control socket')
