@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from patroni.control import CallbackKind, RecoveryTarget, SlotMode, TargetKind
 from patroni.control.recovery import PostgresRecovery
+from patroni.dcs import Leader
 
 
 class TestPostgresRecovery(unittest.TestCase):
@@ -52,6 +53,7 @@ class TestPostgresRecovery(unittest.TestCase):
         )
 
         self.assertTrue(self.recovery.needed(target))
+        self.assertIsInstance(source[0], Leader)
         self.assertEqual('127.0.0.1', source[0].conn_kwargs()['host'])
 
     def test_callback_maps_only_allowlisted_action(self) -> None:

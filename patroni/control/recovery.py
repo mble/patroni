@@ -151,13 +151,13 @@ def _target(target: Optional[RecoveryTarget]) -> Optional[Union[Leader, RemoteMe
     }
     if target.kind == TargetKind.REMOTE:
         raw_standby = global_config.get_standby_cluster_config()
-        standby: Mapping[str, Any] = cast(Mapping[str, Any], raw_standby) \
-            if isinstance(raw_standby, Mapping) else {}
-        data.update({key: standby[key] for key in REMOTE_RECOVERY_PARAMETERS if standby.get(key)})
-        data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
-        if target.slot_name:
-            data['primary_slot_name'] = target.slot_name
-        return RemoteMember(target.name, data)
+        if isinstance(raw_standby, Mapping) and raw_standby:
+            standby = cast(Mapping[str, Any], raw_standby)
+            data.update({key: standby[key] for key in REMOTE_RECOVERY_PARAMETERS if standby.get(key)})
+            data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
+            if target.slot_name:
+                data['primary_slot_name'] = target.slot_name
+            return RemoteMember(target.name, data)
 
     data['role'] = target.role
     if target.checkpoint_after_promote is None:

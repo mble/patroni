@@ -1,6 +1,6 @@
 """PostgreSQL lifecycle command driver."""
 from threading import Event, RLock
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, cast, Dict, Mapping, Optional, TYPE_CHECKING
 
 from patroni import global_config
 from patroni.async_executor import CriticalTask
@@ -269,12 +269,14 @@ def _member(target: Optional[FollowTarget]) -> Optional[Member]:
             'dbname': target.database,
         }
     if target.kind == TargetKind.REMOTE:
-        standby_config = global_config.get_standby_cluster_config()
-        recovery_parameters = ('restore_command', 'archive_cleanup_command', 'recovery_min_apply_delay')
-        data.update({name: standby_config[name] for name in recovery_parameters if standby_config.get(name)})
-        data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
-        if target.slot_name:
-            data['primary_slot_name'] = target.slot_name
-        return RemoteMember(target.name, data)
+        raw_standby = global_config.get_standby_cluster_config()
+        if isinstance(raw_standby, Mapping) and raw_standby:
+            standby = cast(Mapping[str, Any], raw_standby)
+            recovery_parameters = ('restore_command', 'archive_cleanup_command', 'recovery_min_apply_delay')
+            data.update({name: standby[name] for name in recovery_parameters if standby.get(name)})
+            data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
+            if target.slot_name:
+                data['primary_slot_name'] = target.slot_name
+            return RemoteMember(target.name, data)
 
     return Member(-1, target.name, None, data)

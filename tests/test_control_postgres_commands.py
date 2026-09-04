@@ -3,13 +3,14 @@ import time
 import unittest
 
 from threading import Event, Thread
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from patroni.control import BootstrapState, CallbackKind, CloneMode, CommandKind, DesiredRole, DivergencePolicy
 from patroni.control.commands import CheckpointMode, CommandValue, DriverResult, EventChannel, EventKind, \
     FollowTarget, LifecycleCommand, RecoveryTarget, ReloadMode, SlotMode, StopMode, TargetKind
 from patroni.control.postgres_commands import PostgresCommandDriver
+from patroni.dcs import RemoteMember
 from patroni.postgresql.misc import PostgresqlRole
 from patroni.postgresql.postmaster import PostmasterProcess
 
@@ -141,6 +142,17 @@ class TestPostgresCommandDriver(unittest.TestCase):
                          member.data['conn_kwargs'])
         self.assertNotIn('password', repr(member))
         self.assertTrue(self.postgresql.follow.call_args[1]['do_reload'])
+
+    @patch('patroni.control.postgres_commands.global_config.get_standby_cluster_config', return_value=None)
+    def test_follow_failsafe_target_is_local(self, standby_config) -> None:
+        self.postgresql.follow.return_value = True
+        target = FollowTarget(TargetKind.REMOTE, 'leader', '127.0.0.1', '5432', 'postgres', None, SlotMode.USE)
+        request = command(CommandKind.FOLLOW, DesiredRole.REPLICA, target=target)
+
+        self.driver.run(request, EventChannel(request.command_id), self.cancelled)
+
+        member = self.postgresql.follow.call_args[0][0]
+        self.assertNotIsInstance(member, RemoteMember)
 
     def test_rewind_uses_typed_policy(self) -> None:
         recovery = Mock()
