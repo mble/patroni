@@ -1,6 +1,6 @@
 import unittest
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from patroni.control import CallbackKind, RecoveryTarget, SlotMode, TargetKind
 from patroni.control.recovery import PostgresRecovery
@@ -39,6 +39,20 @@ class TestPostgresRecovery(unittest.TestCase):
 
         self.assertEqual('127.0.0.1', source[0].conn_kwargs()['host'])
         self.assertNotIn('password', repr(source[0]))
+
+    @patch('patroni.control.recovery.global_config.get_standby_cluster_config', return_value=None)
+    def test_remote_target_needs_no_standby_config(self, standby_config) -> None:
+        source = []
+        self.recovery._rewind.rewind_or_reinitialize_needed_and_possible = Mock(
+            side_effect=lambda member: source.append(member) or True,
+        )
+        target = RecoveryTarget(
+            TargetKind.REMOTE, 'leader', '127.0.0.1', '5432', 'postgres', None,
+            SlotMode.USE, None, None,
+        )
+
+        self.assertTrue(self.recovery.needed(target))
+        self.assertEqual('127.0.0.1', source[0].conn_kwargs()['host'])
 
     def test_callback_maps_only_allowlisted_action(self) -> None:
         self.recovery.callback(CallbackKind.START)

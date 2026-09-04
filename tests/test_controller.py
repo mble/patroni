@@ -80,7 +80,7 @@ import patroni.controller
 
     def test_rejects_agent_only_configuration(self) -> None:
         base = {
-            'controller': {'socket': '/run/patroni/agent.sock'},
+            'controller': {'socket': os.path.abspath('agent.sock')},
             'etcd3': {'hosts': ['etcd:2379']},
         }
         documents = (
@@ -151,7 +151,7 @@ class TestPatroniController(unittest.TestCase):
             'ttl': 30,
             'loop_wait': 10,
             'retry_timeout': 10,
-            'controller': {'socket': '/run/patroni/agent.sock'},
+            'controller': {'socket': os.path.abspath('agent.sock')},
             'etcd3': {'host': 'etcd:2379'},
             'postgresql': {
                 'scope': 'cluster-a',

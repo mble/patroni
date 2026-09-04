@@ -150,7 +150,7 @@ def _target(target: Optional[RecoveryTarget]) -> Optional[Union[Leader, RemoteMe
         },
     }
     if target.kind == TargetKind.REMOTE:
-        standby = global_config.get_standby_cluster_config()
+        standby = global_config.get_standby_cluster_config() or {}
         data.update({key: standby[key] for key in REMOTE_RECOVERY_PARAMETERS if standby.get(key)})
         data['no_replication_slot'] = target.slot_mode == SlotMode.DISABLE
         if target.slot_name:
