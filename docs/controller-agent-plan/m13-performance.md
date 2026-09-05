@@ -39,3 +39,31 @@ Raw samples are retained in
 
 The unmatched 77.0 MiB PSS and 2.836 ms REST p95 results were environmental.
 No performance regression is attributable to the M11–M13 code range.
+
+## Write-availability RTO
+
+A client attempted one autocommit insert against every member every 20 ms.
+The probe recorded successful commit responses, DCS leader observations, and
+REST completion. Five planned switchovers and three leader-container crashes
+ran against M13 with PostgreSQL 18.6.
+
+| Transition | Samples | Interval | Median | Range |
+|---|---:|---|---:|---:|
+| Switchover: last old write to first new write | 5 | SQL gap | 5,455.974 ms | 5,426.980–5,492.569 ms |
+| Switchover: request to DCS leader change | 5 | Control plane | 2,737.646 ms | 2,692.424–2,824.965 ms |
+| Switchover: request to REST completion | 5 | API | 3,085.832 ms | 3,083.450–3,092.492 ms |
+| Switchover: DCS change to first new write | 5 | Promotion | 3,052.471 ms | 2,973.731–3,053.801 ms |
+| Switchover: REST completion to first new write | 5 | API lag | 2,701.713 ms | 2,662.775–2,706.203 ms |
+| Crash: last old write to first new write | 3 | SQL gap | 34,430.340 ms | 32,693.683–34,550.654 ms |
+| Crash: last old write to DCS leader change | 3 | Lease expiry | 32,294.411 ms | 30,478.188–32,445.917 ms |
+| Crash: DCS change to first new write | 3 | Promotion | 2,135.929 ms | 2,104.737–2,215.496 ms |
+
+REST success reports the DCS leader change, not write availability. Planned
+switchover therefore returned about 2.7 seconds before the first confirmed new
+write. Crash RTO is dominated by the default 30-second leader TTL. No sample
+observed a successful old-leader write after the first new-leader write.
+
+These measurements characterize the default configuration; M13 has no stated
+write-RTO acceptance limit. Raw samples are retained in
+`/private/tmp/patroni-rto-switchover.csv` and
+`/private/tmp/patroni-rto-crash.csv`.
