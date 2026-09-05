@@ -11,7 +11,7 @@ M13 is complete for fork revision `ddeadb92`. No upstream merge is planned.
 | A05 | Saturate status RPC and reset both connections | Grants renew; workers remain bounded; control sequence stays valid | Process test passes |
 | A06 | Cancel and fence during callback acknowledgement | Wait exits promptly; phases remain ordered | Unit and process pass |
 | A07 | Fail the Unix accept loop in Kubernetes | Socket disappears and kubelet restarts the agent | k3d passes |
-| A08 | Repeat M11 performance measurements | Any CPU, PSS, REST, or HA regression is reviewed | Complete; results below |
+| A08 | Repeat M11 performance measurements | Any CPU, PSS, REST, or HA regression is reviewed | Matched repeat passes |
 
 ## Fault matrix
 
@@ -47,10 +47,6 @@ mode, single-primary, authority-expiry fencing, and independent-restart checks.
 
 ## Local performance repeat
 
-PostgreSQL 18 transition p95 changed by +1.0% for switchover and +0.3% for
-failover. Idle Patroni CPU fell from 0.500% to 0.433% core. All three pass.
-
-Fresh idle PSS rose from 69.9 to 77.0 MiB. Median REST p50 rose from 1.332 to
-1.778 ms and p95 from 1.716 to 2.836 ms. The repeat used a newer PostgreSQL 18
-runtime than M11, so it is not a matched attribution. The regressions remain
-visible and require a matched-runtime repeat before attribution.
+The [matched M11–M13 repeat](m13-performance.md) found no attributable PSS,
+CPU, REST, HA-cycle, switchover, or failover regression. The earlier PSS and
+REST increases were environmental.

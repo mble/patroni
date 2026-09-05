@@ -38,5 +38,6 @@ See the [M13 acceptance matrix](../m13-acceptance.md).
 - PostgreSQL 13 same-PGDATA split-to-monolith-to-split rollout passes.
 - PostgreSQL 13 and 18 split Jepsen campaigns pass.
 - PostgreSQL 17 mixed-version Jepsen and same-PGDATA rollout pass.
+- The matched M11–M13 performance repeat finds no attributable regression.
 - The controller-loss smoke test is wired into Linux CI. macOS cannot run it
   because the production transport requires Linux `SO_PEERCRED`.
