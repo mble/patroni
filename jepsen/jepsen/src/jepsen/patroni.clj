@@ -339,12 +339,20 @@
    :drop-socket
    :restart-pod])
 
-(def ^:private fault-index (atom -1))
+(def ^:private faults-per-round 2)
 
-(defn- next-fault []
-  ;; Cover every fault before repeating. Seeds still vary target selection.
-  (let [index (swap! fault-index #(mod (inc %) (count nemesis-starts)))]
-    (nth nemesis-starts index)))
+(defn- fault-events []
+  ;; A pure sequence cannot skip faults during speculative generator reads.
+  (->> nemesis-starts
+       (partition-all faults-per-round)
+       (mapcat (fn [faults]
+                 (concat (map (fn [fault] {:type :info, :f fault}) faults)
+                         [{:type :info, :f :probe-primary}
+                          {:type :sleep, :value recovery-seconds}
+                          {:type :info, :f :probe-primary}
+                          {:type :info, :f :resume-processes}
+                          {:type :info, :f :stop}
+                          {:type :sleep, :value recovery-seconds}])))))
 
 (def ^:private fault-coverage
   "Reject campaigns which did not request every required fault."
@@ -380,16 +388,7 @@
    :generator (gen/phases
                 (->> a
                      (gen/stagger 1/50)
-                     (gen/nemesis
-                       (fn [] (map gen/once
-                                    [{:type :info, :f (next-fault)}
-                                     {:type :info, :f (next-fault)}
-                                     {:type :info, :f :probe-primary}
-                                     {:type :sleep, :value recovery-seconds}
-                                     {:type :info, :f :probe-primary}
-                                     {:type :info, :f :resume-processes}
-                                     {:type :info, :f :stop}
-                                     {:type :sleep, :value recovery-seconds}])))
+                     (gen/nemesis (gen/cycle (fault-events)))
                      (gen/time-limit test-time-limit))
                 (->> r
                      (gen/stagger 1)

@@ -22,6 +22,14 @@ def test_rollout_selects_split_replica() -> None:
     assert 'test -d /etc/service/patroni-agent' in script
 
 
+def test_rollout_waits_for_ssh() -> None:
+    script = ROLLOUT.read_text()
+
+    assert 'SSH_WAIT_ATTEMPTS' in script
+    assert 'wait_ssh_key "$node"' in script
+    assert 'if ssh-keyscan -t rsa "$node"' in script
+
+
 def test_rollout_checks_installed_agent() -> None:
     script = ROLLOUT.read_text()
 

@@ -4,6 +4,7 @@
 set -euo pipefail
 
 readonly PATRONI_NODE_COUNT=3
+readonly SSH_WAIT_ATTEMPTS=30
 readonly MEMBER_WAIT_ATTEMPTS=90
 readonly SERVICE_WAIT_ATTEMPTS=30
 readonly MONOLITH_SERVICE=/etc/patroni-services/patroni
@@ -12,11 +13,26 @@ readonly KNOWN_HOSTS=/root/.ssh/known_hosts
 
 touch "$KNOWN_HOSTS"
 
+wait_ssh_key() {
+    local node="$1"
+
+    if ssh-keygen -F "$node" -f "$KNOWN_HOSTS" >/dev/null; then
+        return
+    fi
+
+    for ((attempt = 1; attempt <= SSH_WAIT_ATTEMPTS; attempt++)); do
+        if ssh-keyscan -t rsa "$node" >> "$KNOWN_HOSTS" 2>/dev/null; then
+            return
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
 for ((index = 1; index <= PATRONI_NODE_COUNT; index++)); do
     node="patroni$index"
-    if ! ssh-keygen -F "$node" -f "$KNOWN_HOSTS" >/dev/null; then
-        ssh-keyscan -t rsa "$node" >> "$KNOWN_HOSTS"
-    fi
+    wait_ssh_key "$node"
 done
 
 pick_replica() {
