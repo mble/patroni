@@ -339,6 +339,25 @@
    :drop-socket
    :restart-pod])
 
+(def ^:private fault-index (atom -1))
+
+(defn- next-fault []
+  ;; Cover every fault before repeating. Seeds still vary target selection.
+  (let [index (swap! fault-index #(mod (inc %) (count nemesis-starts)))]
+    (nth nemesis-starts index)))
+
+(def ^:private fault-coverage
+  "Reject campaigns which did not request every required fault."
+  (reify checker/Checker
+    (check [this test history opts]
+      (let [observed (->> history
+                          (r/filter #(= :info (:type %)))
+                          (r/map :f)
+                          (into #{}))
+            missing (set/difference (set nemesis-starts) observed)]
+        {:valid? (empty? missing)
+         :missing (vec (sort-by name missing))}))))
+
 (defn patroni-test
   [patroni-nodes etcd-nodes]
   {:nodes     (concat patroni-nodes etcd-nodes)
@@ -363,8 +382,8 @@
                      (gen/stagger 1/50)
                      (gen/nemesis
                        (fn [] (map gen/once
-                                    [{:type :info, :f (choose nemesis-starts)}
-                                     {:type :info, :f (choose nemesis-starts)}
+                                    [{:type :info, :f (next-fault)}
+                                     {:type :info, :f (next-fault)}
                                      {:type :info, :f :probe-primary}
                                      {:type :sleep, :value recovery-seconds}
                                      {:type :info, :f :probe-primary}
@@ -381,6 +400,7 @@
                                      {:type :info, :f :probe-primary}
                                      {:type :sleep, :value recovery-seconds}])))
                      (gen/time-limit final-time-limit)))
-   :checker   (checker/compose {:history patroni-set
+   :checker   (checker/compose {:fault-coverage fault-coverage
+                                :history patroni-set
                                 :writable-primary primary-overlap})
    :remote    control/ssh})

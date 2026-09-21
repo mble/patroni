@@ -17,11 +17,14 @@ fault phase and a two-minute final phase:
 Qualification exposed cached health, stopped-primary observation, and missing
 agent thread-pool defects. Each remediation added a failing regression test
 before its fix. Clean images then passed all three campaigns and same-PGDATA
-rollout tests. CI repeats this matrix.
+rollout tests. CI repeats each topology with two fixed seeds.
 
-The required CI matrix uses those durations and seeds. It retains histories,
-checker output, DCS state, and process logs. The merge ruleset must require
-every matrix job.
+The required CI matrix uses those durations and seeds `17`, `71`, `29`, `92`,
+`43`, and `83`. It retains histories, checker output, DCS state, and process
+logs for 90 days. The merge ruleset must require every matrix job.
+
+Prior runs do not qualify later safety changes. Run the full matrix for each
+release candidate.
 
 ## Security
 

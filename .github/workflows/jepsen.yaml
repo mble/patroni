@@ -1,12 +1,27 @@
 name: Jepsen tests
 
 on:
+  push:
+    branches:
+      - controller-agent
+    paths:
+      - '.github/workflows/jepsen.yaml'
+      - 'jepsen/**'
+      - 'patroni/**'
+      - 'setup.py'
+      - 'tests/test_agent.py'
+      - 'tests/test_control*.py'
+      - 'tests/test_controller.py'
+
   pull_request:
     paths:
       - '.github/workflows/jepsen.yaml'
       - 'jepsen/**'
       - 'patroni/**'
       - 'setup.py'
+      - 'tests/test_agent.py'
+      - 'tests/test_control*.py'
+      - 'tests/test_controller.py'
 
   workflow_dispatch:
 
@@ -23,11 +38,23 @@ jobs:
             postgres: 13
             compose: jepsen/docker-compose.yml
           - topology: split
+            seed: 71
+            postgres: 13
+            compose: jepsen/docker-compose.yml
+          - topology: split
             seed: 29
+            postgres: 18
+            compose: jepsen/docker-compose.yml
+          - topology: split
+            seed: 92
             postgres: 18
             compose: jepsen/docker-compose.yml
           - topology: mixed
             seed: 43
+            postgres: 17
+            compose: jepsen/docker-compose.yml:jepsen/docker-compose-mixed.yml
+          - topology: mixed
+            seed: 83
             postgres: 17
             compose: jepsen/docker-compose.yml:jepsen/docker-compose-mixed.yml
     env:
@@ -83,4 +110,4 @@ jobs:
         name: jepsen-evidence-${{ matrix.topology }}-pg${{ matrix.postgres }}-${{ matrix.seed }}
         path: jepsen/logs
         if-no-files-found: error
-        retention-days: 14
+        retention-days: 90

@@ -20,5 +20,26 @@
                           {:node "patroni2" :start 20 :end 40}]}]]
     (is (false? (:valid? (jepsen.checker/check check {} history {}))))))
 
+(deftest fault-cycle-covers-every-fault
+  (let [fault-index (ns-resolve 'jepsen.patroni 'fault-index)
+        next-fault (ns-resolve 'jepsen.patroni 'next-fault)]
+    (reset! @fault-index -1)
+
+    (is (= (set patroni/nemesis-starts)
+           (set (repeatedly (count patroni/nemesis-starts) next-fault))))))
+
+(deftest missing-fault-coverage-fails
+  (let [coverage @(ns-resolve 'jepsen.patroni 'fault-coverage)
+        complete (map-indexed (fn [index fault]
+                                {:index index, :type :info, :f fault})
+                              patroni/nemesis-starts)
+        history (map-indexed (fn [index fault]
+                               {:index index, :type :info, :f fault})
+                             (rest patroni/nemesis-starts))
+        result (jepsen.checker/check coverage {} history {})]
+    (is (:valid? (jepsen.checker/check coverage {} complete {})))
+    (is (false? (:valid? result)))
+    (is (= [:start-halves] (:missing result)))))
+
 (deftest patroni-test
   (is (:valid? (:results (jepsen/run! (patroni/patroni-test patroni_nodes etcd_nodes))))))

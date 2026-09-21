@@ -1,6 +1,7 @@
 """Independent agent authority deadline monitoring."""
 import logging
 
+from enum import Enum
 from threading import Event, RLock, Thread
 from typing import Callable, Optional
 
@@ -9,6 +10,11 @@ from .models import SafetyAction
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHECK_INTERVAL = 0.1
+
+
+class _CheckResult(Enum):
+    WAIT = 'wait'
+    RETRY = 'retry'
 
 
 class AuthorityMonitor:
@@ -20,7 +26,7 @@ class AuthorityMonitor:
 
         self._interval = interval
         self._guard: Optional[Callable[[], SafetyAction]] = None
-        self._fence: Optional[Callable[[], None]] = None
+        self._fence: Optional[Callable[[], bool]] = None
         self._schedule: Optional[Callable[[], Optional[float]]] = None
         self._lock = RLock()
         self._wake = Event()
@@ -28,7 +34,7 @@ class AuthorityMonitor:
         self._thread: Optional[Thread] = None
         self._fencing = False
 
-    def bind(self, guard: Callable[[], SafetyAction], fence: Callable[[], None],
+    def bind(self, guard: Callable[[], SafetyAction], fence: Callable[[], bool],
              schedule: Optional[Callable[[], Optional[float]]] = None) -> None:
         """Install the transport-owned safety callbacks once."""
         with self._lock:
@@ -66,8 +72,21 @@ class AuthorityMonitor:
             self._wake.clear()
             if self._closed.is_set():
                 return
-            self._check()
+            result = self._check()
+            delay = self._delay(result)
+
+    def _delay(self, result: _CheckResult) -> Optional[float]:
+        """Keep callback failures from disabling authority enforcement."""
+        if result == _CheckResult.RETRY:
+            return self._interval
+
+        try:
             delay = self._next_delay()
+        except Exception:
+            logger.exception('Authority monitor scheduling failed')
+            delay = self._interval
+
+        return delay
 
     def _next_delay(self) -> Optional[float]:
         with self._lock:
@@ -80,23 +99,28 @@ class AuthorityMonitor:
             raise ValueError('authority delay must not be negative')
         return delay
 
-    def _check(self) -> None:
+    def _check(self) -> _CheckResult:
         with self._lock:
             guard = self._guard
             fence = self._fence
         if guard is None or fence is None:
-            return
+            return _CheckResult.WAIT
 
         try:
             action = guard()
             if action != SafetyAction.FENCE:
                 self._fencing = False
-                return
+                return _CheckResult.WAIT
             if self._fencing:
-                return
+                return _CheckResult.WAIT
 
             self._fencing = True
-            fence()
+            if fence():
+                return _CheckResult.WAIT
+
+            self._fencing = False
+            return _CheckResult.RETRY
         except Exception:
             self._fencing = False
             logger.exception('Authority monitor failed')
+            return _CheckResult.RETRY

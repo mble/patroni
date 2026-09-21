@@ -468,18 +468,18 @@ class AgentRpc:
                 timing = self._timing
             stop_timeout = timeout if timeout is not None \
                 else timing.retry_timeout if timing is not None else DEFAULT_RPC_TIMEOUT
-            stopped = self._node.fence(stop_timeout)
+            self._node.fence(stop_timeout)
             snapshot = self._node.snapshot(
                 SnapshotDetail.BASIC, Freshness.FRESH, ObservationContext(None),
             )
             if snapshot.observed_role == PostgresRole.PRIMARY:
-                return stopped
+                return False
 
             with self._safety_lock:
                 safety = self._safety_state()
                 if safety.snapshot.agent_state == AgentState.FENCING:
                     safety.fence_complete(snapshot.observed_role)
-            return stopped
+            return True
 
     def _safety_state(self) -> SafetyState:
         if self._safety is None:

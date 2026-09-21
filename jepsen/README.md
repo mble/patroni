@@ -13,20 +13,23 @@ docker compose down
 
 Use `docker-compose-mixed.yml` as a second Compose file for the mixed topology.
 
-The required CI job runs recorded seeds `17`, `29`, and `43`. Split runs cover
-PostgreSQL 13 and 18; the mixed run covers PostgreSQL 17. Each 15-minute cycle
-combines two of:
+The required CI job runs two fixed seeds per topology: `17` and `71` for
+PostgreSQL 13 split, `29` and `92` for PostgreSQL 18 split, and `43` and `83`
+for PostgreSQL 17 mixed. Each 15-minute cycle combines two of:
 
 - controller, agent, or PostgreSQL kill/pause;
 - socket loss or whole-member restart;
 - etcd or Patroni network partition;
 - switchover.
 
+The generator requests every fault before repeating. The checker rejects a run
+which ends without complete fault coverage.
+
 The checker rejects lost committed writes, unexpected writes, and sampled
 overlapping writable primaries. Each primary probe holds a one-second write
 transaction on every member concurrently. CI retains the history, nemesis
 events, checker output, DCS state, Patroni logs, PostgreSQL logs, and final
-cluster state for 14 days.
+cluster state for 90 days.
 
 `rollout.sh` first converts one replica from split mode to monolithic Patroni
 and back. It proves PostgreSQL stops between managers and PGDATA keeps the same

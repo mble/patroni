@@ -298,6 +298,41 @@ class TestAgentRpc(unittest.TestCase):
         self.assertTrue(fenced.wait(0.2))
         monitor.close()
 
+    def test_monitor_retries_failed_primary_fence(self) -> None:
+        fenced = Event()
+        monitor = AuthorityMonitor(0.01)
+        node = Mock()
+        node.snapshot.return_value = Mock(observed_role=PostgresRole.REPLICA)
+
+        def fence(timeout) -> bool:
+            if node.fence.call_count == 1:
+                return False
+
+            node.snapshot.return_value = Mock(observed_role=PostgresRole.REPLICA)
+            fenced.set()
+            return True
+
+        node.fence.side_effect = fence
+        rpc = AgentRpc(node, self.agent_id, self.clock, monitor, Mock())
+        self.assertIsNone(rpc.handle(self.request(Operation.HELLO, None, 1, agent_id='')).error)
+        timing = Timing(30.0, 10.0, 10.0, 20.0)
+        grant = AuthorityGrant(
+            AuthorityKind.LEADER, self.controller_id, self.agent_id, 1, 2,
+            self.clock(), self.clock() + 1, timing,
+        )
+        self.assertIsNone(rpc.handle(self.request(Operation.GRANT, grant, 2)).error)
+
+        node.snapshot.return_value = Mock(observed_role=PostgresRole.PRIMARY)
+        self.clock.value += 1
+        monitor.start()
+
+        self.assertTrue(fenced.wait(1))
+        monitor.close()
+        self.assertEqual(2, node.fence.call_count)
+
+        telemetry = rpc.handle(self.request(Operation.TELEMETRY, None, 3)).body
+        self.assertEqual(2, telemetry.fence_count)
+
     def test_configuration_and_telemetry_are_typed(self) -> None:
         config = Mock()
         config.return_value = ConfigApply.APPLIED
